@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { GoogleGenAI, Modality } from "@google/genai";
 import { GEMINI_LIVE_MODEL } from "@/lib/gemini";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -69,8 +68,8 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // SDK session reference
-  const sessionRef = useRef<any>(null);
+  // WebSocket reference
+  const wsRef = useRef<WebSocket | null>(null);
   // Audio context for playback
   const audioCtxRef = useRef<AudioContext | null>(null);
   // MediaStream for mic input
@@ -96,9 +95,8 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
     });
   }, []);
 
-  // ── Start mic capture and stream audio to session ─────────────────────────
   const startMic = useCallback(async () => {
-    if (!sessionRef.current) return;
+    if (!wsRef.current) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current = stream;
@@ -115,7 +113,7 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
       processorRef.current = processor;
 
       processor.onaudioprocess = (e) => {
-        if (mutedRef.current || !sessionRef.current) return;
+        if (mutedRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
         const float32 = e.inputBuffer.getChannelData(0);
         // Convert Float32 → Int16 little-endian
         const int16 = new Int16Array(float32.length);
@@ -128,11 +126,16 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
         bytes.forEach((b) => (binary += String.fromCharCode(b)));
         const b64 = btoa(binary);
         try {
-          sessionRef.current.sendRealtimeInput({
-            audio: { data: b64, mimeType: "audio/pcm;rate=16000" },
-          });
+          wsRef.current?.send(JSON.stringify({
+            realtimeInput: {
+              mediaChunks: [{
+                mimeType: "audio/pcm;rate=16000",
+                data: b64,
+              }]
+            }
+          }));
         } catch (_) {
-          // session may have closed; ignore
+          // websocket may have closed; ignore
         }
       };
 
@@ -153,9 +156,8 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
     micStreamRef.current = null;
   }, []);
 
-  // ── Start screen sharing and send JPEG frames ─────────────────────────────
   const startScreenShare = useCallback(async () => {
-    if (!sessionRef.current) return;
+    if (!wsRef.current) return;
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
       screenStreamRef.current = stream;
@@ -171,7 +173,7 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
 
       // Send one frame per second (Live API max: 1 fps for video)
       screenIntervalRef.current = setInterval(() => {
-        if (!sessionRef.current || !video.videoWidth) return;
+        if (wsRef.current?.readyState !== WebSocket.OPEN || !video.videoWidth) return;
         canvas.width = Math.min(video.videoWidth, 1280);
         canvas.height = Math.min(
           video.videoHeight,
@@ -181,9 +183,14 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
         const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
         const b64 = dataUrl.split(",")[1];
         try {
-          sessionRef.current.sendRealtimeInput({
-            video: { data: b64, mimeType: "image/jpeg" },
-          });
+          wsRef.current?.send(JSON.stringify({
+            realtimeInput: {
+              mediaChunks: [{
+                mimeType: "image/jpeg",
+                data: b64,
+              }]
+            }
+          }));
         } catch (_) {}
       }, 1000);
 
@@ -233,42 +240,58 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
         audioCtxRef.current = new AudioContext();
       }
 
-      // 3. Connect using the ephemeral token as the apiKey
-      const ai = new GoogleGenAI({ apiKey: token });
-      const session = await ai.live.connect({
-        model: GEMINI_LIVE_MODEL,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-        },
-        callbacks: {
-          onopen: () => {
-            console.debug("[GeminiLive] Connection opened");
-            setAgentState("connected");
-          },
-          onmessage: async (message: any) => {
-            await handleMessage(message);
-          },
-          onerror: (e: any) => {
-            // JS Error objects often log as {} because properties are non-enumerable.
-            // Let's stringify all properties to see what's actually failing.
-            const errorDetails = e ? JSON.stringify(e, Object.getOwnPropertyNames(e)) : "Unknown error";
-            console.error("[GeminiLive] Connection Error:", errorDetails);
-            setError(`Connection Error: ${e?.message || e?.type || 'See console for details'}`);
-            setAgentState("disconnected");
-          },
-          onclose: (e: any) => {
-            console.debug("[GeminiLive] Closed:", e?.reason);
-            setAgentState("disconnected");
-          },
-        },
-      });
+      // 3. Connect using the ephemeral token via WebSocket
+      const WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${token}`;
+      const ws = new WebSocket(WS_URL);
 
-      sessionRef.current = session;
+      ws.onopen = async () => {
+        console.debug("[GeminiLive] Connection opened");
+        
+        // Send initial configuration
+        const setupMessage = {
+          setup: {
+            model: `models/${GEMINI_LIVE_MODEL}`,
+            generationConfig: {
+              responseModalities: ["AUDIO"],
+            },
+            systemInstruction: {
+              parts: [{ text: systemInstruction }]
+            }
+          }
+        };
+        ws.send(JSON.stringify(setupMessage));
+        
+        setAgentState("connected");
+        // 4. Start mic immediately after connecting
+        await startMic();
+      };
 
-      // 4. Start mic immediately after connecting
-      await startMic();
+      ws.onmessage = async (event) => {
+        try {
+          let data = event.data;
+          if (data instanceof Blob) {
+            data = await data.text();
+          }
+          const message = JSON.parse(data);
+          await handleMessage(message);
+        } catch (err) {
+          console.error("[GeminiLive] Error parsing message:", err);
+        }
+      };
+
+      ws.onerror = (e: any) => {
+        console.error("[GeminiLive] WebSocket Error:", e);
+        setError(`Connection Error: See console for details`);
+        setAgentState("disconnected");
+      };
+
+      ws.onclose = (e: any) => {
+        console.debug("[GeminiLive] Closed:", e?.reason);
+        setAgentState("disconnected");
+      };
+
+      wsRef.current = ws;
+
     } catch (err: any) {
       console.error("[useGeminiLive] connect failed:", err);
       setError(err?.message ?? "Failed to connect");
@@ -277,9 +300,14 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionConfig, startMic]);
 
-  // ── Handle incoming messages from the Live API ────────────────────────────
   const handleMessage = useCallback(
     async (message: any) => {
+      // Setup complete response
+      if (message.setupComplete) {
+        console.debug("[GeminiLive] Setup complete.");
+        return;
+      }
+
       const sc = message.serverContent;
       if (!sc) return;
 
@@ -310,14 +338,13 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
     [appendTranscript]
   );
 
-  // ── Disconnect ────────────────────────────────────────────────────────────
   const disconnect = useCallback(() => {
     stopMic();
     stopScreenShare();
     try {
-      sessionRef.current?.close();
+      wsRef.current?.close();
     } catch (_) {}
-    sessionRef.current = null;
+    wsRef.current = null;
     audioCtxRef.current?.close();
     audioCtxRef.current = null;
     setAgentState("disconnected");
@@ -343,9 +370,17 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
   // ── Send a text message ───────────────────────────────────────────────────
   const sendText = useCallback(
     (text: string) => {
-      if (!sessionRef.current || !text.trim()) return;
+      if (wsRef.current?.readyState !== WebSocket.OPEN || !text.trim()) return;
       appendTranscript("user", text);
-      sessionRef.current.sendRealtimeInput({ text });
+      wsRef.current.send(JSON.stringify({
+        clientContent: {
+          turns: [{
+            role: "user",
+            parts: [{ text }]
+          }],
+          turnComplete: true
+        }
+      }));
     },
     [appendTranscript]
   );
