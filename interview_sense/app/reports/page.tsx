@@ -7,6 +7,8 @@ import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { DashboardHeader } from '@/components/dashboard/header'
 import { Sidebar } from '@/components/dashboard/sidebar'
+import { ProtectedRoute } from '@/components/ProtectedRoute'
+import { useAuth } from '@/context/AuthContext'
 import { BarChart3, TrendingUp, Target, Loader2 } from 'lucide-react'
 import {
   getRecentSessions,
@@ -36,6 +38,15 @@ function ScoreBadge({ score }: { score: number }) {
 }
 
 export default function ReportsPage() {
+  return (
+    <ProtectedRoute>
+      <ReportsContent />
+    </ProtectedRoute>
+  )
+}
+
+function ReportsContent() {
+  const { firebaseUser } = useAuth()
   const searchParams = useSearchParams()
   const focusSessionId = searchParams.get('session')
 
@@ -43,11 +54,12 @@ export default function ReportsPage() {
   const [loading, setLoading]   = useState(true)
 
   useEffect(() => {
-    getRecentSessions(50).then((data) => {
+    if (!firebaseUser) return
+    getRecentSessions(firebaseUser.uid, 50).then((data) => {
       setSessions(data)
       setLoading(false)
     })
-  }, [])
+  }, [firebaseUser])
 
   const completed = sessions.filter((s) => s.status === 'completed' && s.score != null)
   const stats = computeUserStats(sessions)

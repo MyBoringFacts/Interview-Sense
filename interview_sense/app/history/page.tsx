@@ -6,6 +6,8 @@ import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { DashboardHeader } from '@/components/dashboard/header'
 import { Sidebar } from '@/components/dashboard/sidebar'
+import { ProtectedRoute } from '@/components/ProtectedRoute'
+import { useAuth } from '@/context/AuthContext'
 import { Download, Trash2, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -25,16 +27,26 @@ function scoreBadge(score: number) {
 }
 
 export default function HistoryPage() {
+  return (
+    <ProtectedRoute>
+      <HistoryContent />
+    </ProtectedRoute>
+  )
+}
+
+function HistoryContent() {
+  const { firebaseUser } = useAuth()
   const [sessions, setSessions] = useState<Session[]>([])
   const [loading, setLoading]   = useState(true)
   const [deleting, setDeleting] = useState<string | null>(null)
 
   useEffect(() => {
-    getAllSessions().then((data) => {
+    if (!firebaseUser) return
+    getAllSessions(firebaseUser.uid).then((data) => {
       setSessions(data)
       setLoading(false)
     })
-  }, [])
+  }, [firebaseUser])
 
   const stats = computeUserStats(sessions)
   const totalHrs = Math.floor(stats.totalDurationSeconds / 3600)

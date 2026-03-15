@@ -1,6 +1,6 @@
 /**
  * Firestore data access layer for InterviewSense.
- * All app data (sessions, evaluations) is queried from here.
+ * All app data (users, sessions, evaluations) is queried from here.
  */
 import { db } from './firebase';
 import {
@@ -11,6 +11,7 @@ import {
   getDocs,
   doc,
   getDoc,
+  setDoc,
   addDoc,
   updateDoc,
   deleteDoc,
@@ -20,24 +21,46 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export interface UserProfile {
+  uid: string;
+  email: string;
+  displayName: string;
+  photoURL?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserSettings {
+  notifications: boolean;
+  emailAlerts: boolean;
+  difficulty: 'beginner' | 'intermediate' | 'advanced';
+  theme: 'light' | 'dark' | 'auto';
+}
+
 export interface Session {
   id: string;
+  userId: string;
   type: string;
   company?: string;
   role?: string;
+  difficulty?: string;
   score?: number;
   durationSeconds?: number;
+  questions?: string[];
   transcript?: Array<{ role: 'ai' | 'user'; text: string }>;
   createdAt: string;
+  completedAt?: string;
   status: 'in-progress' | 'completed';
 }
 
 export interface Evaluation {
   id: string;
   sessionId: string;
+  userId: string;
   category: string;
   score: number;
   notes: string;
+  event?: any;
   createdAt: string;
 }
 
@@ -49,14 +72,91 @@ export interface UserStats {
   bestCategory: string | null;
 }
 
+// ─── User profile helpers ─────────────────────────────────────────────────────
+
+/** Get user profile by UID. */
+export async function getUserProfile(uid: string): Promise<UserProfile | null> {
+  if (!db) return null;
+  try {
+    const snap = await getDoc(doc(db, 'users', uid));
+    if (!snap.exists()) return null;
+    return { uid: snap.id, ...snap.data() } as UserProfile;
+  } catch (err) {
+    console.error('[getUserProfile]', err);
+    return null;
+  }
+}
+
+/** Create a new user profile. Doc ID = UID. */
+export async function createUserProfile(
+  uid: string,
+  data: Omit<UserProfile, 'uid'>
+): Promise<void> {
+  if (!db) return;
+  try {
+    await setDoc(doc(db, 'users', uid), { uid, ...data });
+  } catch (err) {
+    console.error('[createUserProfile]', err);
+  }
+}
+
+/** Update an existing user profile. */
+export async function updateUserProfile(
+  uid: string,
+  data: Partial<UserProfile>
+): Promise<void> {
+  if (!db) return;
+  try {
+    await updateDoc(doc(db, 'users', uid), data as DocumentData);
+  } catch (err) {
+    console.error('[updateUserProfile]', err);
+  }
+}
+
+// ─── User settings helpers ────────────────────────────────────────────────────
+
+const DEFAULT_SETTINGS: UserSettings = {
+  notifications: true,
+  emailAlerts: false,
+  difficulty: 'intermediate',
+  theme: 'dark',
+};
+
+/** Get user settings. Returns defaults if not found. */
+export async function getUserSettings(uid: string): Promise<UserSettings> {
+  if (!db) return DEFAULT_SETTINGS;
+  try {
+    const snap = await getDoc(doc(db, 'users', uid, 'settings', 'preferences'));
+    if (!snap.exists()) return DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS, ...snap.data() } as UserSettings;
+  } catch (err) {
+    console.error('[getUserSettings]', err);
+    return DEFAULT_SETTINGS;
+  }
+}
+
+/** Update user settings (merge). */
+export async function updateUserSettings(
+  uid: string,
+  data: Partial<UserSettings>
+): Promise<void> {
+  if (!db) return;
+  try {
+    await setDoc(doc(db, 'users', uid, 'settings', 'preferences'), data, { merge: true });
+  } catch (err) {
+    console.error('[updateUserSettings]', err);
+  }
+}
+
 // ─── Session helpers ──────────────────────────────────────────────────────────
 
-/** Fetch the most recent N completed sessions. */
-export async function getRecentSessions(count = 10): Promise<Session[]> {
+/** Fetch the most recent N completed sessions for a user. */
+export async function getRecentSessions(userId: string, count = 10): Promise<Session[]> {
   if (!db) return [];
   try {
     const q = query(
       collection(db, 'sessions'),
+      where('userId', '==', userId),
       orderBy('createdAt', 'desc'),
       limit(count)
     );
@@ -68,11 +168,15 @@ export async function getRecentSessions(count = 10): Promise<Session[]> {
   }
 }
 
-/** Fetch all sessions (for the history page). */
-export async function getAllSessions(): Promise<Session[]> {
+/** Fetch all sessions for a user (for the history page). */
+export async function getAllSessions(userId: string): Promise<Session[]> {
   if (!db) return [];
   try {
-    const q = query(collection(db, 'sessions'), orderBy('createdAt', 'desc'));
+    const q = query(
+      collection(db, 'sessions'),
+      where('userId', '==', userId),
+      orderBy('createdAt', 'desc')
+    );
     const snap = await getDocs(q);
     return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Session));
   } catch (err) {

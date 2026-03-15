@@ -1,27 +1,58 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { DashboardHeader } from '@/components/dashboard/header'
 import { Sidebar } from '@/components/dashboard/sidebar'
-import { Bell, Lock, Palette, Zap, Save } from 'lucide-react'
+import { ProtectedRoute } from '@/components/ProtectedRoute'
+import { useAuth } from '@/context/AuthContext'
+import { getUserSettings, updateUserSettings, type UserSettings } from '@/lib/firestore'
+import { Bell, Lock, Palette, Zap, Save, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export default function SettingsPage() {
-  const [settings, setSettings] = useState({
+  return (
+    <ProtectedRoute>
+      <SettingsContent />
+    </ProtectedRoute>
+  )
+}
+
+function SettingsContent() {
+  const { firebaseUser } = useAuth()
+  const [settings, setSettings] = useState<UserSettings & { email: string }>({
     email: '',
     notifications: true,
     emailAlerts: false,
     difficulty: 'intermediate',
     theme: 'dark',
   })
+  const [saving, setSaving] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    if (!firebaseUser) return
+    setSettings((prev) => ({ ...prev, email: firebaseUser.email || '' }))
+    getUserSettings(firebaseUser.uid).then((s) => {
+      setSettings((prev) => ({ ...prev, ...s }))
+      setLoaded(true)
+    })
+  }, [firebaseUser])
+
+  const handleSave = async () => {
+    if (!firebaseUser) return
+    setSaving(true)
+    const { email, ...settingsToSave } = settings
+    await updateUserSettings(firebaseUser.uid, settingsToSave)
+    setSaving(false)
+  }
 
   const sections = [
-    { id: 'account',       label: 'Account',              icon: Lock,    iconColor: 'text-primary',   delay: 'delay-75' },
-    { id: 'notifications', label: 'Notifications',        icon: Bell,    iconColor: 'text-secondary', delay: 'delay-150' },
-    { id: 'preferences',   label: 'Interview Preferences', icon: Zap,    iconColor: 'text-accent',    delay: 'delay-225' },
-    { id: 'appearance',    label: 'Appearance',            icon: Palette, iconColor: 'text-primary',   delay: 'delay-300' },
+    { id: 'account', label: 'Account', icon: Lock, iconColor: 'text-primary', delay: 'delay-75' },
+    { id: 'notifications', label: 'Notifications', icon: Bell, iconColor: 'text-secondary', delay: 'delay-150' },
+    { id: 'preferences', label: 'Interview Preferences', icon: Zap, iconColor: 'text-accent', delay: 'delay-225' },
+    { id: 'appearance', label: 'Appearance', icon: Palette, iconColor: 'text-primary', delay: 'delay-300' },
   ]
 
   return (
@@ -68,8 +99,8 @@ export default function SettingsPage() {
             </div>
             <div className="p-6 divide-y divide-border/40 space-y-0">
               {[
-                { key: 'notifications' as const, label: 'Interview Reminders',   sub: 'Get notified about upcoming scheduled interviews' },
-                { key: 'emailAlerts'   as const, label: 'Email Alerts',          sub: 'Receive email updates about your performance' },
+                { key: 'notifications' as const, label: 'Interview Reminders', sub: 'Get notified about upcoming scheduled interviews' },
+                { key: 'emailAlerts' as const, label: 'Email Alerts', sub: 'Receive email updates about your performance' },
               ].map(({ key, label, sub }) => (
                 <div key={key} className="flex items-center justify-between py-4 first:pt-0 last:pb-0">
                   <div>
@@ -109,7 +140,7 @@ export default function SettingsPage() {
                 {['beginner', 'intermediate', 'advanced'].map((level) => (
                   <button
                     key={level}
-                    onClick={() => setSettings({ ...settings, difficulty: level })}
+                    onClick={() => setSettings({ ...settings, difficulty: level as UserSettings['difficulty'] })}
                     className={cn(
                       'flex-1 py-2 rounded-lg text-sm font-medium capitalize transition-all duration-200 active:scale-95',
                       settings.difficulty === level
@@ -136,7 +167,7 @@ export default function SettingsPage() {
                 {['light', 'dark', 'auto'].map((theme) => (
                   <button
                     key={theme}
-                    onClick={() => setSettings({ ...settings, theme })}
+                    onClick={() => setSettings({ ...settings, theme: theme as UserSettings['theme'] })}
                     className={cn(
                       'flex-1 py-2 rounded-lg text-sm font-medium capitalize transition-all duration-200 active:scale-95',
                       settings.theme === theme
@@ -153,9 +184,9 @@ export default function SettingsPage() {
 
           {/* Save */}
           <div className="animate-fade-up delay-375 pb-6">
-            <Button className="w-full" size="lg">
-              <Save />
-              Save Changes
+            <Button className="w-full" size="lg" onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="animate-spin" /> : <Save />}
+              {saving ? 'Saving…' : 'Save Changes'}
             </Button>
           </div>
         </main>

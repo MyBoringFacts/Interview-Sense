@@ -119,56 +119,111 @@
   * {
     @apply border-border outline-ring/50;
   }
+
   body {
     @apply bg-background text-foreground;
   }
 }
 
 @keyframes fade-up {
-  from { opacity: 0; transform: translateY(16px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes fade-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes scale-in {
-  from { opacity: 0; transform: scale(0.95); }
-  to   { opacity: 1; transform: scale(1); }
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 @keyframes slide-in-left {
-  from { opacity: 0; transform: translateX(-16px); }
-  to   { opacity: 1; transform: translateX(0); }
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 @keyframes shimmer {
-  0%   { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
+  0% {
+    background-position: -200% 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
 }
 
 @layer utilities {
   .animate-fade-up {
     animation: fade-up 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
+
   .animate-fade-in {
     animation: fade-in 0.35s ease both;
   }
+
   .animate-scale-in {
     animation: scale-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
+
   .animate-slide-in-left {
     animation: slide-in-left 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
 
   /* staggered delay helpers */
-  .delay-75  { animation-delay: 75ms;  }
-  .delay-150 { animation-delay: 150ms; }
-  .delay-225 { animation-delay: 225ms; }
-  .delay-300 { animation-delay: 300ms; }
-  .delay-375 { animation-delay: 375ms; }
-  .delay-450 { animation-delay: 450ms; }
-  .delay-525 { animation-delay: 525ms; }
+  .delay-75 {
+    animation-delay: 75ms;
+  }
+
+  .delay-150 {
+    animation-delay: 150ms;
+  }
+
+  .delay-225 {
+    animation-delay: 225ms;
+  }
+
+  .delay-300 {
+    animation-delay: 300ms;
+  }
+
+  .delay-375 {
+    animation-delay: 375ms;
+  }
+
+  .delay-450 {
+    animation-delay: 450ms;
+  }
+
+  .delay-525 {
+    animation-delay: 525ms;
+  }
 }

@@ -19,44 +19,79 @@ export interface TranscriptEntry {
 
 interface SessionConfig {
   type: string;
-  company?: string;
-  role?: string;
+  resume?: string;
+  jobDescription?: string;
 }
 
-// ─── Audio playback helpers ───────────────────────────────────────────────────
-
-/** Decode a base64 string into an ArrayBuffer. */
-function base64ToArrayBuffer(b64: string): ArrayBuffer {
-  const binary = atob(b64);
-  const buf = new ArrayBuffer(binary.length);
-  const view = new Uint8Array(buf);
-  for (let i = 0; i < binary.length; i++) view[i] = binary.charCodeAt(i);
-  return buf;
-}
+// ─── PCM Audio Player (queued, non-blocking) ──────────────────────────────────
 
 /**
- * Play raw 16-bit little-endian PCM audio at 24 kHz (Gemini's output format).
- * Returns a promise that resolves when playback finishes.
+ * Plays raw 16-bit LE PCM audio at 24 kHz using a queued scheduling approach.
+ * Audio chunks are scheduled back-to-back so playback is smooth and continuous.
  */
-async function playPcm24k(
-  audioCtx: AudioContext,
-  rawB64: string
-): Promise<void> {
-  const raw = base64ToArrayBuffer(rawB64);
-  const int16 = new Int16Array(raw);
-  const float32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+class PCMPlayer {
+  private ctx: AudioContext;
+  private gainNode: GainNode;
+  private scheduledTime: number = 0;
+  private activeSources: Set<AudioBufferSourceNode> = new Set();
 
-  const audioBuffer = audioCtx.createBuffer(1, float32.length, 24000);
-  audioBuffer.copyToChannel(float32, 0);
+  constructor() {
+    this.ctx = new AudioContext({ sampleRate: 24000 });
+    this.gainNode = this.ctx.createGain();
+    this.gainNode.connect(this.ctx.destination);
+  }
 
-  return new Promise((resolve) => {
-    const source = audioCtx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(audioCtx.destination);
-    source.onended = () => resolve();
-    source.start();
-  });
+  async resume() {
+    if (this.ctx.state === "suspended") {
+      await this.ctx.resume();
+    }
+  }
+
+  get state() {
+    return this.ctx.state;
+  }
+
+  play(b64: string) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+    const int16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+    const buffer = this.ctx.createBuffer(1, float32.length, 24000);
+    buffer.copyToChannel(float32, 0);
+
+    const source = this.ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.gainNode);
+
+    source.onended = () => {
+      this.activeSources.delete(source);
+    };
+    this.activeSources.add(source);
+
+    const now = this.ctx.currentTime;
+    const startAt = Math.max(now, this.scheduledTime);
+    source.start(startAt);
+    this.scheduledTime = startAt + buffer.duration;
+  }
+
+  interrupt() {
+    for (const source of this.activeSources) {
+      try { source.stop(); } catch (_) {}
+    }
+    this.activeSources.clear();
+    this.scheduledTime = 0;
+  }
+
+  destroy() {
+    this.interrupt();
+    try {
+      this.ctx.close();
+    } catch (_) {}
+  }
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -68,20 +103,17 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // WebSocket reference
   const wsRef = useRef<WebSocket | null>(null);
-  // Audio context for playback
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  // MediaStream for mic input
+  const playerRef = useRef<PCMPlayer | null>(null);
+  const micCtxRef = useRef<AudioContext | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
-  // ScriptProcessor node
   const processorRef = useRef<ScriptProcessorNode | null>(null);
-  // Screen capture stream
   const screenStreamRef = useRef<MediaStream | null>(null);
-  // Frame capture interval
   const screenIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Mute flag ref (accessed inside audio callback)
   const mutedRef = useRef(false);
+  const handleMessageRef = useRef<((msg: any) => Promise<void>) | null>(null);
+  // Monotonically increasing ID to invalidate stale async connect() calls
+  const connectionIdRef = useRef(0);
 
   // ── Append to transcript (coalesce consecutive same-role entries) ──────────
   const appendTranscript = useCallback((role: "ai" | "user", text: string) => {
@@ -95,53 +127,61 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
     });
   }, []);
 
+  // ── Start mic capture (16 kHz, sends PCM16 base64 chunks) ─────────────────
   const startMic = useCallback(async () => {
     if (!wsRef.current) return;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
       micStreamRef.current = stream;
 
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new AudioContext({ sampleRate: 16000 });
+      const micCtx = new AudioContext({ sampleRate: 16000 });
+      micCtxRef.current = micCtx;
+      if (micCtx.state === "suspended") {
+        await micCtx.resume();
       }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === "suspended") await ctx.resume();
 
-      const source = ctx.createMediaStreamSource(stream);
-      // ScriptProcessor is deprecated but universally supported and easy to use
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      console.debug("[GeminiLive] Mic AudioContext state:", micCtx.state, "sampleRate:", micCtx.sampleRate);
+
+      const source = micCtx.createMediaStreamSource(stream);
+      const processor = micCtx.createScriptProcessor(4096, 1, 1);
       processorRef.current = processor;
 
       processor.onaudioprocess = (e) => {
         if (mutedRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
         const float32 = e.inputBuffer.getChannelData(0);
-        // Convert Float32 → Int16 little-endian
         const int16 = new Int16Array(float32.length);
         for (let i = 0; i < float32.length; i++) {
           int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
         }
-        // Base64 encode
         const bytes = new Uint8Array(int16.buffer);
         let binary = "";
-        bytes.forEach((b) => (binary += String.fromCharCode(b)));
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
         const b64 = btoa(binary);
         try {
-          wsRef.current?.send(JSON.stringify({
-            realtimeInput: {
-              mediaChunks: [{
-                mimeType: "audio/pcm;rate=16000",
-                data: b64,
-              }]
-            }
-          }));
-        } catch (_) {
-          // websocket may have closed; ignore
-        }
+          wsRef.current?.send(
+            JSON.stringify({
+              realtimeInput: {
+                audio: {
+                  mimeType: "audio/pcm;rate=16000",
+                  data: b64,
+                },
+              },
+            })
+          );
+        } catch (_) {}
       };
 
       source.connect(processor);
-      processor.connect(ctx.destination); // must connect to avoid silence in Chrome
+      processor.connect(micCtx.destination);
       setAgentState("listening");
+      console.debug("[GeminiLive] Microphone started (16 kHz PCM)");
     } catch (err: any) {
       console.error("[useGeminiLive] Mic error:", err);
       setError("Microphone access denied or unavailable.");
@@ -154,8 +194,13 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
     processorRef.current = null;
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
     micStreamRef.current = null;
+    try {
+      micCtxRef.current?.close();
+    } catch (_) {}
+    micCtxRef.current = null;
   }, []);
 
+  // ── Start screen sharing ──────────────────────────────────────────────────
   const startScreenShare = useCallback(async () => {
     if (!wsRef.current) return;
     try {
@@ -171,30 +216,29 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
       const canvas = document.createElement("canvas");
       const ctx2d = canvas.getContext("2d")!;
 
-      // Send one frame per second (Live API max: 1 fps for video)
       screenIntervalRef.current = setInterval(() => {
         if (wsRef.current?.readyState !== WebSocket.OPEN || !video.videoWidth) return;
         canvas.width = Math.min(video.videoWidth, 1280);
-        canvas.height = Math.min(
-          video.videoHeight,
-          Math.round((canvas.width / video.videoWidth) * video.videoHeight)
+        canvas.height = Math.round(
+          (canvas.width / video.videoWidth) * video.videoHeight
         );
         ctx2d.drawImage(video, 0, 0, canvas.width, canvas.height);
         const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
         const b64 = dataUrl.split(",")[1];
         try {
-          wsRef.current?.send(JSON.stringify({
-            realtimeInput: {
-              mediaChunks: [{
-                mimeType: "image/jpeg",
-                data: b64,
-              }]
-            }
-          }));
+          wsRef.current?.send(
+            JSON.stringify({
+              realtimeInput: {
+                video: {
+                  mimeType: "image/jpeg",
+                  data: b64,
+                },
+              },
+            })
+          );
         } catch (_) {}
       }, 1000);
 
-      // Stop sharing if user closes the browser prompt
       stream.getVideoTracks()[0].addEventListener("ended", () => stopScreenShare());
     } catch (err: any) {
       console.error("[useGeminiLive] Screen share error:", err);
@@ -212,58 +256,161 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
     setIsScreenSharing(false);
   }, []);
 
+  // ── Handle incoming WebSocket messages ────────────────────────────────────
+  const handleMessage = useCallback(
+    async (message: any) => {
+      if (message.setupComplete) {
+        console.debug("[GeminiLive] Setup complete — starting mic");
+        setAgentState("connected");
+        await startMic();
+        return;
+      }
+
+      // Transcription messages are top-level fields, not inside serverContent
+      if (message.outputTranscription?.text) {
+        appendTranscript("ai", message.outputTranscription.text);
+      }
+
+      if (message.inputTranscription?.text) {
+        appendTranscript("user", message.inputTranscription.text);
+      }
+
+      const sc = message.serverContent;
+      if (!sc) return;
+
+      if (sc.interrupted) {
+        console.debug("[GeminiLive] Interrupted — stopping audio playback");
+        playerRef.current?.interrupt();
+        setAgentState("listening");
+        return;
+      }
+
+      if (sc.modelTurn?.parts) {
+        for (const part of sc.modelTurn.parts) {
+          if (part.inlineData?.data && playerRef.current) {
+            setAgentState("speaking");
+            playerRef.current.play(part.inlineData.data);
+          }
+        }
+      }
+
+      // Also check transcription inside serverContent (some API versions)
+      if (sc.outputTranscription?.text) {
+        appendTranscript("ai", sc.outputTranscription.text);
+      }
+
+      if (sc.inputTranscription?.text) {
+        appendTranscript("user", sc.inputTranscription.text);
+      }
+
+      if (sc.turnComplete) {
+        setAgentState("listening");
+      }
+    },
+    [appendTranscript, startMic]
+  );
+
+  useEffect(() => {
+    handleMessageRef.current = handleMessage;
+  }, [handleMessage]);
+
+  // ── Ensure AudioContexts are running on any user interaction ──────────────
+  // Safety net: browsers may block AudioContext until a gesture even after
+  // the initial connect() click (e.g. tab backgrounded then foregrounded).
+  useEffect(() => {
+    const resumeAll = async () => {
+      try {
+        if (micCtxRef.current?.state === "suspended") {
+          await micCtxRef.current.resume();
+          console.debug("[GeminiLive] Mic AudioContext resumed via user gesture");
+        }
+      } catch (_) {}
+      try {
+        if (playerRef.current?.state === "suspended") {
+          await playerRef.current.resume();
+          console.debug("[GeminiLive] Player AudioContext resumed via user gesture");
+        }
+      } catch (_) {}
+    };
+    document.addEventListener("click", resumeAll);
+    document.addEventListener("keydown", resumeAll);
+    return () => {
+      document.removeEventListener("click", resumeAll);
+      document.removeEventListener("keydown", resumeAll);
+    };
+  }, []);
+
   // ── Connect to Live API via ephemeral token ───────────────────────────────
+  // IMPORTANT: Call this from a user-gesture handler (button click) so that
+  // AudioContext creation is allowed by the browser's autoplay policy.
   const connect = useCallback(async () => {
+    const connId = ++connectionIdRef.current;
     setAgentState("connecting");
     setError(null);
     setTranscript([]);
 
     try {
-      // 1. Fetch ephemeral token from our secure server route
-      console.log("[useGeminiLive] Fetching ephemeral token from /api/live-token...");
-      const systemInstruction = buildSystemInstruction(sessionConfig);
+      console.log("[useGeminiLive] Fetching ephemeral token…");
       const res = await fetch("/api/live-token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ systemInstruction }),
       });
+
+      // Abort if a newer connect() was called while we were fetching
+      if (connId !== connectionIdRef.current) return;
+
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        console.error("[useGeminiLive] Ephemeral token fetch failed:", body.error);
         throw new Error(body.error ?? "Failed to get ephemeral token");
       }
       const { token } = await res.json();
-      console.log("[useGeminiLive] Ephemeral token received. Connecting to Gemini Live API...");
+      console.log("[useGeminiLive] Token received. Connecting WebSocket…");
 
-      // 2. Create AudioContext for playback (must be created on user gesture)
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new AudioContext();
-      }
+      // Create PCM player for audio playback (24 kHz)
+      if (playerRef.current) playerRef.current.destroy();
+      const player = new PCMPlayer();
+      await player.resume();
+      playerRef.current = player;
+      console.debug("[GeminiLive] Player AudioContext state:", player.state);
 
-      // 3. Connect using the ephemeral token via WebSocket
       const WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${token}`;
       const ws = new WebSocket(WS_URL);
 
-      ws.onopen = async () => {
-        console.debug("[GeminiLive] Connection opened");
-        
-        // Send initial configuration
+      ws.onopen = () => {
+        if (connId !== connectionIdRef.current) {
+          ws.close();
+          return;
+        }
+        console.debug("[GeminiLive] WebSocket opened — sending setup");
+
+        const systemInstruction = buildSystemInstruction(sessionConfig);
         const setupMessage = {
           setup: {
             model: `models/${GEMINI_LIVE_MODEL}`,
             generationConfig: {
               responseModalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: "Puck",
+                  },
+                },
+              },
             },
             systemInstruction: {
-              parts: [{ text: systemInstruction }]
-            }
-          }
+              parts: [{ text: systemInstruction }],
+            },
+            realtimeInputConfig: {
+              automaticActivityDetection: {
+                disabled: false,
+              },
+            },
+            inputAudioTranscription: {},
+            outputAudioTranscription: {},
+          },
         };
         ws.send(JSON.stringify(setupMessage));
-        
-        setAgentState("connected");
-        // 4. Start mic immediately after connecting
-        await startMic();
+        console.debug("[GeminiLive] Setup sent");
       };
 
       ws.onmessage = async (event) => {
@@ -273,80 +420,45 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
             data = await data.text();
           }
           const message = JSON.parse(data);
-          await handleMessage(message);
+          await handleMessageRef.current?.(message);
         } catch (err) {
           console.error("[GeminiLive] Error parsing message:", err);
         }
       };
 
-      ws.onerror = (e: any) => {
-        console.error("[GeminiLive] WebSocket Error:", e);
-        setError(`Connection Error: See console for details`);
+      ws.onerror = () => {
+        if (connId !== connectionIdRef.current) return;
+        setError("Connection error — check console for details.");
         setAgentState("disconnected");
       };
 
-      ws.onclose = (e: any) => {
-        console.debug("[GeminiLive] Closed:", e?.reason);
+      ws.onclose = (e: CloseEvent) => {
+        console.debug("[GeminiLive] WebSocket closed:", e.code, e.reason);
+        if (connId !== connectionIdRef.current) return;
         setAgentState("disconnected");
       };
 
       wsRef.current = ws;
-
     } catch (err: any) {
+      if (connId !== connectionIdRef.current) return;
       console.error("[useGeminiLive] connect failed:", err);
       setError(err?.message ?? "Failed to connect");
       setAgentState("disconnected");
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionConfig, startMic]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionConfig]);
 
-  const handleMessage = useCallback(
-    async (message: any) => {
-      // Setup complete response
-      if (message.setupComplete) {
-        console.debug("[GeminiLive] Setup complete.");
-        return;
-      }
-
-      const sc = message.serverContent;
-      if (!sc) return;
-
-      // AI audio output
-      if (sc.modelTurn?.parts) {
-        setAgentState("speaking");
-        for (const part of sc.modelTurn.parts) {
-          if (part.inlineData?.data && audioCtxRef.current) {
-            await playPcm24k(audioCtxRef.current, part.inlineData.data);
-          }
-        }
-      }
-
-      // AI audio transcription (outputTranscription)
-      if (sc.outputTranscription?.text) {
-        appendTranscript("ai", sc.outputTranscription.text);
-      }
-
-      // User audio transcription (inputTranscription)
-      if (sc.inputTranscription?.text) {
-        appendTranscript("user", sc.inputTranscription.text);
-      }
-
-      if (sc.turnComplete) {
-        setAgentState("listening");
-      }
-    },
-    [appendTranscript]
-  );
-
+  // ── Disconnect ────────────────────────────────────────────────────────────
   const disconnect = useCallback(() => {
+    connectionIdRef.current++;
     stopMic();
     stopScreenShare();
     try {
       wsRef.current?.close();
     } catch (_) {}
     wsRef.current = null;
-    audioCtxRef.current?.close();
-    audioCtxRef.current = null;
+    playerRef.current?.destroy();
+    playerRef.current = null;
     setAgentState("disconnected");
   }, [stopMic, stopScreenShare]);
 
@@ -372,15 +484,19 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
     (text: string) => {
       if (wsRef.current?.readyState !== WebSocket.OPEN || !text.trim()) return;
       appendTranscript("user", text);
-      wsRef.current.send(JSON.stringify({
-        clientContent: {
-          turns: [{
-            role: "user",
-            parts: [{ text }]
-          }],
-          turnComplete: true
-        }
-      }));
+      wsRef.current.send(
+        JSON.stringify({
+          clientContent: {
+            turns: [
+              {
+                role: "user",
+                parts: [{ text }],
+              },
+            ],
+            turnComplete: true,
+          },
+        })
+      );
     },
     [appendTranscript]
   );
@@ -388,7 +504,16 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
   // ── Cleanup on unmount ────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
-      disconnect();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      connectionIdRef.current++;
+      stopMic();
+      stopScreenShare();
+      try {
+        wsRef.current?.close();
+      } catch (_) {}
+      wsRef.current = null;
+      playerRef.current?.destroy();
+      playerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -411,25 +536,33 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
 
 function buildSystemInstruction(config: {
   type: string;
-  company?: string;
-  role?: string;
+  resume?: string;
+  jobDescription?: string;
 }): string {
-  const company = config.company ? ` at ${config.company}` : "";
-  const role = config.role ? ` for the role of "${config.role}"` : "";
-  return `You are an expert technical interviewer conducting a ${config.type} interview${company}${role}.
+  let context = `You are an expert technical interviewer conducting a ${config.type} interview. This entire interview is conducted in ENGLISH only.\n\n`;
 
-Your responsibilities:
-1. Start by warmly greeting the candidate and asking them to introduce themselves.
-2. Ask focused, realistic interview questions relevant to the selected type and company.
-3. Actively listen — when the candidate explains something (verbally or on their shared screen), ask insightful follow-up questions.
+  if (config.resume) {
+    context += `Here is the candidate's resume/background:\n"""\n${config.resume}\n"""\n\n`;
+  }
+  
+  if (config.jobDescription) {
+    context += `Here is the job description they are interviewing for:\n"""\n${config.jobDescription}\n"""\n\n`;
+  }
+
+  return `${context}Your responsibilities:
+1. Start by warmly greeting the candidate. If you have their resume, you can briefly mention a highlight to break the ice. Ask them to introduce themselves.
+2. Ask focused, realistic interview questions relevant to the selected interview type. If a job description was provided, tailor the questions to the specific requirements of the role. If a resume was provided, tie the questions to their past experience where relevant.
+3. Actively listen — when the candidate explains something (verbally or on their shared screen), ask insightful follow-up questions. If the candidate shares their screen, comment on what you see and ask relevant follow-ups about their code, design, or work.
 4. Keep a professional but friendly tone. Allow natural pauses and interruptions.
 5. After each candidate response, briefly acknowledge it and move to the next question or a follow-up.
 6. When the candidate asks to end, thank them and close the session warmly.
 
 Important rules:
+- LANGUAGE: You MUST speak, respond, and conduct the entire interview EXCLUSIVELY in English (en-US). Even if the candidate speaks in another language, respond only in English and politely ask them to continue in English.
 - Speak naturally and conversationally — you will be heard as voice audio.
 - Keep individual responses concise (1-3 sentences) unless the question warrants more.
 - Do NOT roleplay as the candidate. Only play the interviewer role.
 - Do NOT mention that you are an AI unless directly asked.
+- If you cannot understand what the candidate said, politely ask them to repeat or clarify.
 `;
 }

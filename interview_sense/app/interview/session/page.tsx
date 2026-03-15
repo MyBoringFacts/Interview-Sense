@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { ProtectedRoute } from '@/components/ProtectedRoute'
 import { InterviewSession } from '@/components/interview/interview-session'
 
 export default function SessionPage() {
@@ -14,8 +15,18 @@ export default function SessionPage() {
   }, [])
 
   if (!config) {
-    return <div>Loading...</div>
+    return (
+      <ProtectedRoute>
+        <div className="flex min-h-screen items-center justify-center bg-background">
+          <p className="text-muted-foreground">Loading...</p>
+        </div>
+      </ProtectedRoute>
+    )
   }
 
-  return <InterviewSession config={config} />
+  return (
+    <ProtectedRoute>
+      <InterviewSession config={config} />
+    </ProtectedRoute>
+  )
 }

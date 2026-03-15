@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useRouter } from 'next/navigation'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
@@ -11,22 +12,25 @@ import {
   Monitor,
   MonitorOff,
   Send,
-  Zap,
   CheckCircle2,
   Wifi,
   WifiOff,
   AlertCircle,
   Loader2,
+  Play,
+  FileText,
+  Sparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { AudioVisualizer } from './audio-visualizer'
 import { useGeminiLive } from '@/hooks/use-gemini-live'
+import { useAuth } from '@/context/AuthContext'
 
 interface InterviewSessionProps {
   config: {
     type: string
-    company?: string
-    role?: string
+    resume?: string
+    jobDescription?: string
   }
 }
 
@@ -38,10 +42,26 @@ const STATE_LABELS: Record<string, string> = {
   speaking: 'AI Speaking',
 }
 
+// Fire background notes every N user turns
+const NOTES_INTERVAL = 4
+
 export function InterviewSession({ config }: InterviewSessionProps) {
+  const router = useRouter()
+  const { firebaseUser } = useAuth()
+
+  const [sessionStarted, setSessionStarted] = useState(false)
   const [sessionEnded, setSessionEnded] = useState(false)
   const [inputValue, setInputValue]     = useState('')
   const [sessionTime, setSessionTime]   = useState(0)
+  const [isEvaluating, setIsEvaluating] = useState(false)
+  const [evaluationDone, setEvaluationDone] = useState(false)
+  const [evalError, setEvalError] = useState<string | null>(null)
+
+  // Persist session ID and background notes across renders without triggering re-renders
+  const sessionIdRef = useRef<string | null>(null)
+  const backgroundNotesRef = useRef<any[]>([])
+  const lastNotedTurnRef = useRef(0)
+  const sessionTimeRef = useRef(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const {
@@ -57,11 +77,39 @@ export function InterviewSession({ config }: InterviewSessionProps) {
     sendText,
   } = useGeminiLive(config)
 
-  // ── Auto-connect when component mounts ──────────────────────────────────
+  // Keep sessionTimeRef in sync so we can read it in the end-handler
   useEffect(() => {
+    sessionTimeRef.current = sessionTime
+  }, [sessionTime])
+
+  // ── Create Firestore session on start (from user-gesture handler) ─────────
+  const createFirestoreSession = useCallback(async () => {
+    try {
+      const res = await fetch('/api/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: firebaseUser?.uid ?? null,
+          type: config.type,
+        }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        sessionIdRef.current = data.sessionId
+        console.debug('[InterviewSession] Session created:', data.sessionId)
+      }
+    } catch (err) {
+      console.error('[InterviewSession] Failed to create session:', err)
+    }
+  }, [firebaseUser, config.type])
+
+  // connect() must be triggered by a user click so the browser allows
+  // AudioContext activation (mic capture + AI audio playback).
+  const handleStartSession = useCallback(() => {
+    setSessionStarted(true)
     connect()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    createFirestoreSession()
+  }, [connect, createFirestoreSession])
 
   // ── Session timer ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -69,6 +117,31 @@ export function InterviewSession({ config }: InterviewSessionProps) {
     const timer = setInterval(() => setSessionTime((t) => t + 1), 1000)
     return () => clearInterval(timer)
   }, [agentState])
+
+  // ── Background note-taking every NOTES_INTERVAL user turns ───────────────
+  useEffect(() => {
+    const userTurns = transcript.filter((t) => t.role === 'user').length
+    if (userTurns === 0) return
+    if (userTurns - lastNotedTurnRef.current < NOTES_INTERVAL) return
+    if (transcript.length < 4) return // wait for a real conversation to develop
+
+    lastNotedTurnRef.current = userTurns
+
+    // Fire-and-forget: no await, no blocking
+    fetch('/api/notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript, sessionConfig: config }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.notes) {
+          backgroundNotesRef.current = [...backgroundNotesRef.current, data.notes]
+          console.debug('[InterviewSession] Background note captured:', data.notes.observations)
+        }
+      })
+      .catch((err) => console.warn('[InterviewSession] Background notes failed:', err))
+  }, [transcript, config])
 
   // ── Auto-scroll transcript ───────────────────────────────────────────────
   useEffect(() => {
@@ -84,24 +157,147 @@ export function InterviewSession({ config }: InterviewSessionProps) {
     setInputValue('')
   }, [inputValue, sendText])
 
-  const handleEndInterview = useCallback(() => {
+  // ── End interview: save session → evaluate → redirect ────────────────────
+  const handleEndInterview = useCallback(async () => {
     disconnect()
     setSessionEnded(true)
-  }, [disconnect])
+    setIsEvaluating(true)
+
+    const duration = sessionTimeRef.current
+    const sessionId = sessionIdRef.current
+    const notes = [...backgroundNotesRef.current]
+    const finalTranscript = [...transcript]
+
+    try {
+      // 1. Persist transcript + duration to Firestore
+      if (sessionId) {
+        await fetch('/api/session', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId,
+            transcript: finalTranscript,
+            durationSeconds: duration,
+          }),
+        })
+      }
+
+      // 2. Run Gemini evaluation
+      const evalRes = await fetch('/api/evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          userId: firebaseUser?.uid ?? null,
+          transcript: finalTranscript,
+          sessionConfig: config,
+          backgroundNotes: notes,
+        }),
+      })
+
+      if (!evalRes.ok) {
+        const errBody = await evalRes.json().catch(() => ({}))
+        throw new Error(errBody.error ?? 'Evaluation failed')
+      }
+
+      setIsEvaluating(false)
+      setEvaluationDone(true)
+
+      // 3. Redirect to the report page after a short delay
+      if (sessionId) {
+        setTimeout(() => router.push(`/reports/${sessionId}`), 1500)
+      }
+    } catch (err: any) {
+      console.error('[InterviewSession] End-of-session pipeline failed:', err)
+      setIsEvaluating(false)
+      setEvalError(err?.message ?? 'Something went wrong during evaluation.')
+    }
+  }, [disconnect, transcript, firebaseUser, config, router])
+
+  // ── Pre-session: require a click so AudioContext is allowed ─────────────
+  if (!sessionStarted) {
+    return (
+      <div className="flex items-center justify-center min-h-screen p-6">
+        <Card className="bg-card/70 border-border/40 p-10 max-w-md w-full text-center space-y-5 animate-scale-in">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/15 border border-primary/30">
+            <Mic className="h-8 w-8 text-primary" />
+          </div>
+          <h2 className="text-2xl font-bold text-foreground">Ready to Begin?</h2>
+          <p className="text-muted-foreground leading-relaxed text-sm">
+            Your <span className="capitalize font-medium text-foreground">{config.type.replace('-', ' ')}</span> interview
+            session is ready. Click below to connect — you&apos;ll need to allow microphone access so the
+            AI interviewer can hear you.
+          </p>
+          <Button size="lg" className="w-full gap-2" onClick={handleStartSession}>
+            <Play className="h-4 w-4" />
+            Start Interview
+          </Button>
+        </Card>
+      </div>
+    )
+  }
 
   // ── Session ended screen ─────────────────────────────────────────────────
   if (sessionEnded) {
     return (
       <div className="flex items-center justify-center min-h-screen p-6">
-        <Card className="bg-card/70 border-border/40 p-10 max-w-md w-full text-center space-y-5 animate-scale-in">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-green-500/15 border border-green-500/30">
-            <CheckCircle2 className="h-8 w-8 text-green-400" />
-          </div>
-          <h2 className="text-2xl font-bold text-foreground">Interview Complete</h2>
-          <p className="text-muted-foreground leading-relaxed">
-            Your session is being analyzed. You&apos;ll receive your detailed report shortly.
-          </p>
-          <Button className="w-full" size="lg">View Report</Button>
+        <Card className="bg-card/70 border-border/40 p-10 max-w-md w-full text-center space-y-6 animate-scale-in">
+          {isEvaluating ? (
+            <>
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/15 border border-primary/30">
+                <Sparkles className="h-8 w-8 text-primary animate-pulse" />
+              </div>
+              <div className="space-y-2">
+                <h2 className="text-2xl font-bold text-foreground">Analyzing Your Session</h2>
+                <p className="text-muted-foreground text-sm leading-relaxed">
+                  Our AI is reviewing your transcript and background notes to generate your personalized feedback report.
+                </p>
+              </div>
+              <div className="flex items-center justify-center gap-3 text-muted-foreground text-sm">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                This takes about 10–15 seconds…
+              </div>
+            </>
+          ) : evaluationDone ? (
+            <>
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-green-500/15 border border-green-500/30">
+                <CheckCircle2 className="h-8 w-8 text-green-400" />
+              </div>
+              <div className="space-y-2">
+                <h2 className="text-2xl font-bold text-foreground">Report Ready!</h2>
+                <p className="text-muted-foreground text-sm leading-relaxed">
+                  Your evaluation is complete. Redirecting you to your report…
+                </p>
+              </div>
+              <div className="flex items-center justify-center gap-3 text-muted-foreground text-sm">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Redirecting…
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-red-500/15 border border-red-500/30">
+                <AlertCircle className="h-8 w-8 text-red-400" />
+              </div>
+              <div className="space-y-2">
+                <h2 className="text-2xl font-bold text-foreground">Evaluation Failed</h2>
+                <p className="text-muted-foreground text-sm leading-relaxed">
+                  {evalError ?? 'Something went wrong. Your transcript was saved.'}
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <Button variant="outline" className="flex-1" onClick={() => router.push('/dashboard')}>
+                  Dashboard
+                </Button>
+                {sessionIdRef.current && (
+                  <Button className="flex-1 gap-2" onClick={() => router.push(`/reports/${sessionIdRef.current}`)}>
+                    <FileText className="h-4 w-4" />
+                    View Partial Report
+                  </Button>
+                )}
+              </div>
+            </>
+          )}
         </Card>
       </div>
     )
@@ -114,7 +310,7 @@ export function InterviewSession({ config }: InterviewSessionProps) {
 
       {/* ── Left: AI Avatar + Controls ─────────────────────────────────── */}
       <div className="col-span-2 bg-black/80 rounded-xl overflow-hidden flex flex-col border border-border/20">
-        <div className="flex-1 bg-gradient-to-br from-primary/15 to-accent/8 flex items-center justify-center relative">
+        <div className="flex-1 bg-linear-to-br from-primary/15 to-accent/8 flex items-center justify-center relative">
 
           {/* AI Avatar / Visualizer */}
           <div className="space-y-5 text-center flex flex-col items-center">
@@ -127,9 +323,7 @@ export function InterviewSession({ config }: InterviewSessionProps) {
               <>
                 <AudioVisualizer state={agentState} />
                 <p className="text-foreground font-medium text-sm">AI Interviewer</p>
-                {config.company && (
-                  <p className="text-xs text-muted-foreground">{config.company} — {config.type}</p>
-                )}
+                <p className="text-xs text-muted-foreground capitalize">{config.type.replace('-', ' ')} Interview</p>
               </>
             )}
           </div>
@@ -144,7 +338,6 @@ export function InterviewSession({ config }: InterviewSessionProps) {
 
           {/* Status + Timer */}
           <div className="absolute top-4 right-4 flex items-center gap-2">
-            {/* Connection indicator */}
             <div className={cn(
               'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border backdrop-blur-sm',
               isConnected
@@ -154,7 +347,6 @@ export function InterviewSession({ config }: InterviewSessionProps) {
               {isConnected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
               {STATE_LABELS[agentState]}
             </div>
-            {/* Timer */}
             <div className="bg-black/60 backdrop-blur-sm px-3 py-1.5 rounded-lg border border-white/10">
               <p className="font-mono text-sm text-foreground tabular-nums">{formatTime(sessionTime)}</p>
             </div>
@@ -165,6 +357,14 @@ export function InterviewSession({ config }: InterviewSessionProps) {
             <div className="absolute top-4 left-4 flex items-center gap-1.5 bg-blue-950/70 border border-blue-500/30 rounded-lg px-2.5 py-1 text-xs text-blue-300 backdrop-blur-sm">
               <Monitor className="h-3 w-3" />
               Screen shared
+            </div>
+          )}
+
+          {/* Background notes indicator */}
+          {backgroundNotesRef.current.length > 0 && (
+            <div className="absolute bottom-20 left-4 flex items-center gap-1.5 bg-primary/10 border border-primary/20 rounded-lg px-2.5 py-1 text-xs text-primary backdrop-blur-sm">
+              <Sparkles className="h-3 w-3" />
+              {backgroundNotesRef.current.length} note{backgroundNotesRef.current.length !== 1 ? 's' : ''} captured
             </div>
           )}
 
@@ -220,7 +420,7 @@ export function InterviewSession({ config }: InterviewSessionProps) {
             <MessageCircle className="h-4 w-4 text-primary" />
             Live Transcript
           </h3>
-          <p className="text-xs text-muted-foreground mt-0.5">{config.type}{config.company ? ` · ${config.company}` : ''}</p>
+          <p className="text-xs text-muted-foreground mt-0.5 capitalize">{config.type.replace('-', ' ')} Interview</p>
         </div>
 
         {/* Messages */}

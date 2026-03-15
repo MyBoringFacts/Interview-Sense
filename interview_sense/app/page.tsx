@@ -22,10 +22,10 @@ export default function Home() {
             </Link>
 
             <div className="flex items-center gap-3">
-              <Link href="/dashboard">
-                <Button variant="outline" size="sm">Dashboard</Button>
+              <Link href="/sign-in">
+                <Button variant="outline" size="sm">Sign In</Button>
               </Link>
-              <Link href="/dashboard">
+              <Link href="/sign-up">
                 <Button size="sm">Get Started <ArrowRight /></Button>
               </Link>
             </div>
@@ -59,14 +59,16 @@ export default function Home() {
                 Start Free Interview
               </Button>
             </Link>
-            <Button size="lg" variant="outline">
-              View Demo
-              <ArrowRight />
-            </Button>
+            <Link href="/sign-up">
+              <Button size="lg" variant="outline">
+                Create Account
+                <ArrowRight />
+              </Button>
+            </Link>
           </div>
 
           <p className="text-sm text-muted-foreground animate-fade-up delay-225">
-            No credit card required — free forever
+            Sign in or create an account to start — no credit card required
           </p>
         </div>
       </section>
@@ -191,7 +193,7 @@ export default function Home() {
             </p>
             <Link href="/interview/new">
               <Button className="w-full" size="lg">
-                Start Your First Interview
+                Sign In to Start Your First Interview
                 <ArrowRight />
               </Button>
             </Link>

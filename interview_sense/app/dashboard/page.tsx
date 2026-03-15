@@ -8,6 +8,8 @@ import { Card } from '@/components/ui/card'
 import { DashboardHeader } from '@/components/dashboard/header'
 import { Sidebar } from '@/components/dashboard/sidebar'
 import { StatsCard } from '@/components/dashboard/stats-card'
+import { ProtectedRoute } from '@/components/ProtectedRoute'
+import { useAuth } from '@/context/AuthContext'
 import {
   getRecentSessions,
   computeUserStats,
@@ -17,15 +19,25 @@ import {
 } from '@/lib/firestore'
 
 export default function DashboardPage() {
+  return (
+    <ProtectedRoute>
+      <DashboardContent />
+    </ProtectedRoute>
+  )
+}
+
+function DashboardContent() {
+  const { firebaseUser } = useAuth()
   const [sessions, setSessions] = useState<Session[]>([])
-  const [loading, setLoading]   = useState(true)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    getRecentSessions(10).then((data) => {
+    if (!firebaseUser) return
+    getRecentSessions(firebaseUser.uid, 10).then((data) => {
       setSessions(data)
       setLoading(false)
     })
-  }, [])
+  }, [firebaseUser])
 
   const stats = computeUserStats(sessions)
   const recent = sessions.slice(0, 5)
@@ -46,10 +58,10 @@ export default function DashboardPage() {
 
           {/* Stats */}
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
-            <StatsCard label="Total Interviews" value={loading ? '—' : String(stats.totalSessions)}        icon={Target}     animationDelay="delay-75" />
-            <StatsCard label="Avg Score"         value={loading ? '—' : stats.avgScore != null ? `${stats.avgScore}/10` : '—'} icon={TrendingUp}  animationDelay="delay-150" />
-            <StatsCard label="This Month"        value={loading ? '—' : String(stats.thisMonthCount)}      icon={Clock}      animationDelay="delay-225" />
-            <StatsCard label="Pending Review"    value={loading ? '—' : String(sessions.filter(s => s.status === 'in-progress').length)} icon={AlertCircle} animationDelay="delay-300" />
+            <StatsCard label="Total Interviews" value={loading ? '—' : String(stats.totalSessions)} icon={Target} animationDelay="delay-75" />
+            <StatsCard label="Avg Score" value={loading ? '—' : stats.avgScore != null ? `${stats.avgScore}/10` : '—'} icon={TrendingUp} animationDelay="delay-150" />
+            <StatsCard label="This Month" value={loading ? '—' : String(stats.thisMonthCount)} icon={Clock} animationDelay="delay-225" />
+            <StatsCard label="Pending Review" value={loading ? '—' : String(sessions.filter(s => s.status === 'in-progress').length)} icon={AlertCircle} animationDelay="delay-300" />
           </div>
 
           {/* Quick Actions */}
