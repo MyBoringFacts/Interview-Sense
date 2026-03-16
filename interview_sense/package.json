@@ -67,7 +67,10 @@
     "@types/node": "^22",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "nanoid": "^5.0.9",
+    "picocolors": "^1.1.0",
     "postcss": "^8.5",
+    "source-map-js": "^1.2.0",
     "tailwindcss": "^4.2.0",
     "tw-animate-css": "1.3.3",
     "typescript": "5.7.3"

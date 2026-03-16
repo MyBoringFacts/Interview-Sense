@@ -127,13 +127,12 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
     });
   }, []);
 
-  // ── Start mic capture (16 kHz, sends PCM16 base64 chunks) ─────────────────
+  // ── Start mic capture (native rate, sends PCM16 base64 chunks) ─────────────
   const startMic = useCallback(async () => {
     if (!wsRef.current) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          sampleRate: 16000,
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
@@ -141,21 +140,39 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
       });
       micStreamRef.current = stream;
 
-      const micCtx = new AudioContext({ sampleRate: 16000 });
+      const micCtx = new AudioContext();
       micCtxRef.current = micCtx;
       if (micCtx.state === "suspended") {
         await micCtx.resume();
       }
 
-      console.debug("[GeminiLive] Mic AudioContext state:", micCtx.state, "sampleRate:", micCtx.sampleRate);
+      const nativeSR = micCtx.sampleRate;
+
+      console.debug("[GeminiLive] Mic AudioContext state:", micCtx.state, "nativeSampleRate:", nativeSR);
+
+      // #region agent log
+      fetch('http://127.0.0.1:7540/ingest/c1bede61-ee4c-44ae-8160-6e68f61ed59e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5c97d4'},body:JSON.stringify({sessionId:'5c97d4',location:'use-gemini-live.ts:startMic',message:'Mic v5 native-rate',data:{state:micCtx.state,nativeSampleRate:nativeSR,mimeType:`audio/pcm;rate=${nativeSR}`,streamActive:stream.active,trackSettings:stream.getAudioTracks()[0]?.getSettings()},timestamp:Date.now(),runId:'post-fix-v5',hypothesisId:'H-I'})}).catch(()=>{});
+      // #endregion
 
       const source = micCtx.createMediaStreamSource(stream);
       const processor = micCtx.createScriptProcessor(4096, 1, 1);
       processorRef.current = processor;
 
+      let audioChunkCount = 0;
       processor.onaudioprocess = (e) => {
         if (mutedRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
         const float32 = e.inputBuffer.getChannelData(0);
+
+        // #region agent log
+        audioChunkCount++;
+        if (audioChunkCount <= 5 || audioChunkCount % 50 === 0) {
+          let rms = 0; let maxVal = 0;
+          for (let i = 0; i < float32.length; i++) { rms += float32[i]*float32[i]; if (Math.abs(float32[i]) > maxVal) maxVal = Math.abs(float32[i]); }
+          rms = Math.sqrt(rms / float32.length);
+          fetch('http://127.0.0.1:7540/ingest/c1bede61-ee4c-44ae-8160-6e68f61ed59e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5c97d4'},body:JSON.stringify({sessionId:'5c97d4',location:'use-gemini-live.ts:onaudioprocess',message:'Audio chunk stats (v3)',data:{chunkNum:audioChunkCount,bufferLength:float32.length,rms:rms.toFixed(6),maxVal:maxVal.toFixed(6),nativeSR,wsReadyState:wsRef.current?.readyState},timestamp:Date.now(),runId:'post-fix-v3',hypothesisId:'H-F'})}).catch(()=>{});
+        }
+        // #endregion
+
         const int16 = new Int16Array(float32.length);
         for (let i = 0; i < float32.length; i++) {
           int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
@@ -164,18 +181,23 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
         let binary = "";
         for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
         const b64 = btoa(binary);
+        const mimeType = `audio/pcm;rate=${nativeSR}`;
         try {
           wsRef.current?.send(
             JSON.stringify({
               realtimeInput: {
                 audio: {
-                  mimeType: "audio/pcm;rate=16000",
+                  mimeType,
                   data: b64,
                 },
               },
             })
           );
-        } catch (_) {}
+        } catch (sendErr) {
+          // #region agent log
+          fetch('http://127.0.0.1:7540/ingest/c1bede61-ee4c-44ae-8160-6e68f61ed59e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5c97d4'},body:JSON.stringify({sessionId:'5c97d4',location:'use-gemini-live.ts:ws-send-error',message:'WebSocket send failed',data:{error:String(sendErr),wsReadyState:wsRef.current?.readyState},timestamp:Date.now(),runId:'post-fix-v3',hypothesisId:'H-C'})}).catch(()=>{});
+          // #endregion
+        }
       };
 
       source.connect(processor);
@@ -216,6 +238,7 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
       const canvas = document.createElement("canvas");
       const ctx2d = canvas.getContext("2d")!;
 
+      let screenFrameCount = 0;
       screenIntervalRef.current = setInterval(() => {
         if (wsRef.current?.readyState !== WebSocket.OPEN || !video.videoWidth) return;
         canvas.width = Math.min(video.videoWidth, 1280);
@@ -225,6 +248,12 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
         ctx2d.drawImage(video, 0, 0, canvas.width, canvas.height);
         const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
         const b64 = dataUrl.split(",")[1];
+        screenFrameCount++;
+        // #region agent log
+        if (screenFrameCount <= 3 || screenFrameCount % 30 === 0) {
+          fetch('http://127.0.0.1:7540/ingest/c1bede61-ee4c-44ae-8160-6e68f61ed59e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5c97d4'},body:JSON.stringify({sessionId:'5c97d4',location:'use-gemini-live.ts:screenShare',message:'Screen frame sent',data:{frameNum:screenFrameCount,width:canvas.width,height:canvas.height,b64Length:b64?.length,wsReadyState:wsRef.current?.readyState},timestamp:Date.now(),hypothesisId:'H-E'})}).catch(()=>{});
+        }
+        // #endregion
         try {
           wsRef.current?.send(
             JSON.stringify({
@@ -382,6 +411,9 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
           return;
         }
         console.debug("[GeminiLive] WebSocket opened — sending setup");
+        // #region agent log
+        fetch('http://127.0.0.1:7540/ingest/c1bede61-ee4c-44ae-8160-6e68f61ed59e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5c97d4'},body:JSON.stringify({sessionId:'5c97d4',location:'use-gemini-live.ts:ws.onopen',message:'WebSocket opened',data:{readyState:ws.readyState,url:ws.url?.substring(0,80)},timestamp:Date.now(),hypothesisId:'H-C'})}).catch(()=>{});
+        // #endregion
 
         const systemInstruction = buildSystemInstruction(sessionConfig);
         const setupMessage = {
@@ -395,6 +427,7 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
                     voiceName: "Puck",
                   },
                 },
+                languageCodes: ["en-US"],
               },
             },
             systemInstruction: {
@@ -403,16 +436,23 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
             realtimeInputConfig: {
               automaticActivityDetection: {
                 disabled: false,
+                startOfSpeechSensitivity: "START_SENSITIVITY_HIGH",
+                endOfSpeechSensitivity: "END_SENSITIVITY_LOW",
+                silenceDurationMs: 2000,
+                prefixPaddingMs: 200,
               },
             },
-            inputAudioTranscription: {},
             outputAudioTranscription: {},
           },
         };
         ws.send(JSON.stringify(setupMessage));
         console.debug("[GeminiLive] Setup sent");
+        // #region agent log
+        fetch('http://127.0.0.1:7540/ingest/c1bede61-ee4c-44ae-8160-6e68f61ed59e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5c97d4'},body:JSON.stringify({sessionId:'5c97d4',location:'use-gemini-live.ts:ws.onopen:setup',message:'Setup config sent (v5-no-input-txn)',data:{model:setupMessage.setup.model,realtimeInputConfig:setupMessage.setup.realtimeInputConfig,speechConfig:setupMessage.setup.generationConfig.speechConfig,hasInputTranscription:!!setupMessage.setup.inputAudioTranscription,hasOutputTranscription:!!setupMessage.setup.outputAudioTranscription},timestamp:Date.now(),runId:'post-fix-v5',hypothesisId:'H-I'})}).catch(()=>{});
+        // #endregion
       };
 
+      let msgCount = 0;
       ws.onmessage = async (event) => {
         try {
           let data = event.data;
@@ -420,6 +460,12 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
             data = await data.text();
           }
           const message = JSON.parse(data);
+          msgCount++;
+          // #region agent log
+          if (message.setupComplete || message.inputTranscription || message.outputTranscription || message.serverContent?.inputTranscription || message.serverContent?.outputTranscription || msgCount <= 3) {
+            fetch('http://127.0.0.1:7540/ingest/c1bede61-ee4c-44ae-8160-6e68f61ed59e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5c97d4'},body:JSON.stringify({sessionId:'5c97d4',location:'use-gemini-live.ts:ws.onmessage',message:'WS message received',data:{msgNum:msgCount,setupComplete:!!message.setupComplete,hasServerContent:!!message.serverContent,inputTranscription:message.inputTranscription?.text||message.serverContent?.inputTranscription?.text||null,outputTranscription:message.outputTranscription?.text||message.serverContent?.outputTranscription?.text||null,interrupted:message.serverContent?.interrupted,turnComplete:message.serverContent?.turnComplete,keys:Object.keys(message)},timestamp:Date.now(),hypothesisId:'H-A'})}).catch(()=>{});
+          }
+          // #endregion
           await handleMessageRef.current?.(message);
         } catch (err) {
           console.error("[GeminiLive] Error parsing message:", err);

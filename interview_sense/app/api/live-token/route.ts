@@ -30,7 +30,7 @@ export async function POST(req: Request) {
 
     const now = new Date();
     const expireTime = new Date(now.getTime() + 30 * 60 * 1000).toISOString();
-    const newSessionExpireTime = new Date(now.getTime() + 2 * 60 * 1000).toISOString();
+    const newSessionExpireTime = new Date(now.getTime() + 30 * 60 * 1000).toISOString();
 
     const token = await (client as any).authTokens.create({
       config: {
