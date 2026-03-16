@@ -443,7 +443,7 @@ export function useGeminiLive(sessionConfig: SessionConfig) {
                 automaticActivityDetection: {
                   disabled: false,
                   startOfSpeechSensitivity: "START_SENSITIVITY_HIGH",
-                  endOfSpeechSensitivity: "END_SENSITIVITY_LOW",
+                  endOfSpeechSensitivity: "END_SENSITIVITY_HIGH",
                   silenceDurationMs: 2000,
                   prefixPaddingMs: 200,
                 },

@@ -19,6 +19,7 @@ import {
   Play,
   FileText,
   Sparkles,
+  ExternalLink,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { AudioVisualizer } from './audio-visualizer'
@@ -218,8 +219,15 @@ export function InterviewSession({ config }: InterviewSessionProps) {
   }, [disconnect, transcript, firebaseUser, config, router])
 
   // ── Pre-session: require a click so AudioContext is allowed ─────────────
-  const hasScreenSharePrompt =
-    !!config.questionPlan && !!config.questionPlan.screen_share_prompt
+  const isTechnical = config.type === 'technical'
+  const leetcodeQuestions = (config.questionPlan?.questions ?? []).filter((q) => q.leetcode_url)
+  const hasLeetCodeLinks = isTechnical && leetcodeQuestions.length > 0
+
+  const openAllLeetCodeLinks = () => {
+    leetcodeQuestions.forEach((q) => {
+      if (q.leetcode_url) window.open(q.leetcode_url, '_blank', 'noopener,noreferrer')
+    })
+  }
 
   if (!sessionStarted) {
     return (
@@ -242,36 +250,61 @@ export function InterviewSession({ config }: InterviewSessionProps) {
             </div>
           </div>
 
-          {hasScreenSharePrompt && !screenShareAcknowledged && (
-            <div className="space-y-3 rounded-md border border-primary/40 bg-primary/5 p-4 text-left">
-              <p className="text-sm font-medium text-primary">
-                {config.questionPlan?.screen_share_prompt}
-              </p>
-              {config.questionPlan?.questions?.length ? (
-                <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground font-medium">
-                    LeetCode problems for this session:
-                  </p>
-                  <ul className="list-disc pl-5 space-y-1 text-xs">
-                    {config.questionPlan.questions.map((q) => (
-                      <li key={q.order}>
-                        {q.leetcode_url ? (
-                          <a
-                            href={q.leetcode_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-primary hover:underline"
-                          >
-                            {q.title}
-                          </a>
-                        ) : (
-                          <span>{q.title}</span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
+          {hasLeetCodeLinks && !screenShareAcknowledged && (
+            <div className="space-y-4 rounded-lg border border-primary/40 bg-primary/5 p-4 text-left">
+              <div className="flex items-start gap-2">
+                <ExternalLink className="h-4 w-4 text-primary mt-0.5 shrink-0" />
+                <p className="text-sm font-medium text-primary leading-snug">
+                  {config.questionPlan?.screen_share_prompt ??
+                    "Please open the LeetCode problems below and share your screen before we begin. Talk through your approach out loud as you code — the AI interviewer will ask follow-up questions based on what it sees."}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                  Problems for this session
+                </p>
+                <ul className="space-y-1.5">
+                  {leetcodeQuestions.map((q) => (
+                    <li key={q.order} className="flex items-center gap-2 text-sm">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[10px] font-bold text-primary">
+                        {q.order}
+                      </span>
+                      <a
+                        href={q.leetcode_url!}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-primary hover:underline flex items-center gap-1"
+                      >
+                        {q.title}
+                        <ExternalLink className="h-3 w-3 opacity-60" />
+                      </a>
+                      {q.difficulty && (
+                        <span className={cn(
+                          'ml-auto text-[10px] font-semibold px-1.5 py-0.5 rounded-full',
+                          q.difficulty.toLowerCase() === 'easy'
+                            ? 'bg-green-500/15 text-green-400'
+                            : q.difficulty.toLowerCase() === 'hard'
+                            ? 'bg-red-500/15 text-red-400'
+                            : 'bg-amber-500/15 text-amber-400',
+                        )}>
+                          {q.difficulty}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full gap-2 border-primary/40 text-primary hover:bg-primary/10"
+                onClick={openAllLeetCodeLinks}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                Open All Problems in New Tabs
+              </Button>
             </div>
           )}
 
@@ -280,7 +313,7 @@ export function InterviewSession({ config }: InterviewSessionProps) {
               size="lg"
               className="w-full gap-2"
               onClick={() => {
-                if (hasScreenSharePrompt && !screenShareAcknowledged) {
+                if (hasLeetCodeLinks && !screenShareAcknowledged) {
                   setScreenShareAcknowledged(true)
                 } else {
                   handleStartSession()
@@ -288,7 +321,7 @@ export function InterviewSession({ config }: InterviewSessionProps) {
               }}
             >
               <Play className="h-4 w-4" />
-              {hasScreenSharePrompt && !screenShareAcknowledged
+              {hasLeetCodeLinks && !screenShareAcknowledged
                 ? "I've opened the problems — Continue"
                 : 'Start Interview'}
             </Button>

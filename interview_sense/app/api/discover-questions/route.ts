@@ -4,12 +4,73 @@ import type { QuestionPlan } from '@/lib/questionDiscovery';
 
 const MODEL = `models/${GEMINI_DISCOVERY_MODEL}`;
 
+// ─── Topic randomisation helpers ───────────────────────────────────────────────
+
+const TOPIC_POOLS: Record<'easy' | 'medium' | 'hard', string[]> = {
+  easy: [
+    'arrays & iteration',
+    'string manipulation',
+    'hash maps & sets',
+    'two pointers',
+    'stack & queue',
+    'linked list basics',
+    'math & number theory',
+    'bit manipulation',
+    'sorting & searching',
+    'simple recursion',
+    'prefix sums',
+    'counting & frequency',
+  ],
+  medium: [
+    'sliding window',
+    'binary search on answer',
+    'tree traversal & path problems',
+    'BFS / DFS on graphs',
+    '1D dynamic programming',
+    'prefix sums & difference arrays',
+    'interval merging & scheduling',
+    'matrix traversal',
+    'greedy algorithms',
+    'monotonic stack / deque',
+    'backtracking',
+    'topological sort',
+    'heap / priority queue',
+    'divide and conquer',
+  ],
+  hard: [
+    '2D dynamic programming',
+    'shortest-path algorithms (Dijkstra, Bellman-Ford)',
+    'advanced graph theory (SCC, bridges)',
+    'trie / suffix structures',
+    'segment tree / binary indexed tree',
+    'union-find (DSU)',
+    'advanced backtracking with pruning',
+    'string matching (KMP, Rabin-Karp)',
+    'bitmask DP',
+    'geometry & sweep line',
+    'network flow',
+    'offline query processing',
+  ],
+};
+
+function pickRandomTopics(difficulty: 'easy' | 'medium' | 'hard', count: number): string[] {
+  const pool = TOPIC_POOLS[difficulty] ?? TOPIC_POOLS.medium;
+  // Fisher-Yates shuffle on a copy
+  const shuffled = [...pool];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled.slice(0, Math.min(count + 1, pool.length));
+}
+
 // ─── Per-track system prompts ──────────────────────────────────────────────────
 
 const TECHNICAL_SYSTEM_PROMPT = `
 You are the Question Discovery Agent for InterviewSense — Technical Round.
 
-You will receive: company_name (string or null), difficulty, role, num_questions.
+You will receive: company_name (string or null), difficulty, role, num_questions,
+and (for Case 2 only) required_topics and session_entropy.
 
 CASE 1 — company_name is provided:
 Search the web using these queries:
@@ -20,14 +81,34 @@ Search the web using these queries:
 
 Extract commonly reported problems, identify specific LeetCode problems by name or
 number if mentioned, and note recurring topics.
+Only include problems that are FREE (not locked behind LeetCode Premium). If a
+reported problem is premium-only, substitute the closest free equivalent instead.
 
 CASE 2 — company_name is null:
-Do NOT search. Select {num_questions} well-known LeetCode problems covering DIVERSE
-topics. No repeated topics.
+Do NOT search. Select {num_questions} LeetCode problems STRICTLY drawn from the
+provided required_topics list. Each question MUST cover a DIFFERENT topic from that
+list. Do NOT default to the most famous / overused problems (e.g. Two Sum, Valid
+Parentheses, Reverse Linked List) unless required_topics explicitly points there.
+Prefer LESS-COMMONLY-SEEN problems that still clearly illustrate the topic.
+Use session_entropy as a tie-breaker when multiple problems would fit — let it
+influence which specific problem number you choose so results vary across sessions.
 
-Easy pool: arrays, strings, hash maps, two pointers, stack
-Medium pool: sliding window, binary search, linked lists, trees, BFS/DFS, DP (1D)
-Hard pool: DP (2D), graphs, tries, heap, advanced backtracking
+CRITICAL — FREE PROBLEMS ONLY:
+You MUST only select LeetCode problems that are FREE (not locked behind LeetCode
+Premium). Never select any problem that requires a Premium subscription to view.
+Well-known premium-locked problems to always avoid include (but are not limited to):
+- Longest Substring with At Most K Distinct Characters (#159, #340)
+- Paint House (#256, #265)
+- Read N Characters Given Read4 (#157, #158)
+- Moving Average from Data Stream (#346)
+- Meeting Rooms (#252, #253)
+- Encode/Decode Strings (#271)
+- Closest Binary Search Tree Value (#270, #272)
+- Count Univalue Subtrees (#250)
+- Flip Game (#293, #294)
+- Sparse Matrix Multiplication (#311)
+If you are uncertain whether a problem is free, choose a different problem that you
+know with confidence is publicly accessible without a subscription.
 
 Always return ONLY this JSON shape, no markdown, no extra text:
 {
@@ -45,11 +126,11 @@ Always return ONLY this JSON shape, no markdown, no extra text:
       "interviewer_notes": string
     }
   ],
-  "screen_share_prompt": string | null
+  "screen_share_prompt": string
 }
 
-screen_share_prompt is ONLY included (non-null) in Case 2. Value should be:
-"Please open the LeetCode link below and share your screen before we begin.
+screen_share_prompt MUST always be non-null for all technical interviews. Value:
+"Please open the LeetCode problem(s) below and share your screen before we begin.
 Talk through your approach out loud as you code — I will ask follow-up questions
 based on what I see on your screen."
 
@@ -219,6 +300,13 @@ export async function POST(req: Request) {
     ];
     if (interviewType === 'custom' && customTopics) {
       promptLines.push(`custom_topics: ${customTopics}`);
+    }
+    // For random technical questions (no company), inject shuffled topics and a
+    // session-unique entropy value so the model picks different problems each time.
+    if (interviewType === 'technical' && !companyName) {
+      const topics = pickRandomTopics(difficulty as 'easy' | 'medium' | 'hard', numQuestions);
+      promptLines.push(`required_topics: ${topics.join(', ')}`);
+      promptLines.push(`session_entropy: ${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
     }
 
     const request: any = {
