@@ -53,15 +53,28 @@ export interface Session {
   status: 'in-progress' | 'completed';
 }
 
+export interface EvaluationCategory {
+  score: number;
+  notes: string;
+}
+
 export interface Evaluation {
   id: string;
   sessionId: string;
   userId: string;
-  category: string;
-  score: number;
-  notes: string;
-  event?: any;
   createdAt: string;
+  overallScore: number;
+  summary: string;
+  categories: {
+    technicalKnowledge: EvaluationCategory;
+    communication: EvaluationCategory;
+    problemSolving: EvaluationCategory;
+    cultureFit: EvaluationCategory;
+  };
+  strengths: string[];
+  improvements: string[];
+  highlights: string[];
+  recommendedResources: string[];
 }
 
 export interface UserStats {
@@ -254,8 +267,8 @@ export async function getEvaluationsForSession(sessionId: string): Promise<Evalu
 export function computeUserStats(sessions: Session[]): UserStats {
   const completed = sessions.filter((s) => s.status === 'completed' && s.score != null);
   const now = new Date();
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-  const thisMonth = sessions.filter((s) => s.createdAt >= startOfMonth);
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const thisMonth = sessions.filter((s) => new Date(s.createdAt) >= startOfMonth);
 
   const avgScore =
     completed.length > 0

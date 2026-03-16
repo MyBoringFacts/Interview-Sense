@@ -101,7 +101,7 @@ export default function SignUpPage() {
 
         <Card className="bg-card/60 border-border/40 backdrop-blur-md p-8 space-y-4 text-center">
           <p className="text-sm text-muted-foreground">
-            Click the link in that email to activate your account, then sign in below.
+            Click the link in that email to activate your account, then sign in below.If you cannot see the email, please check in spam folder.
           </p>
           <Button
             variant="outline"

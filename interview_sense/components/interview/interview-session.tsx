@@ -2,16 +2,15 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
+import { motion } from 'framer-motion'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
   PhoneOff,
   Mic,
   MicOff,
-  MessageCircle,
   Monitor,
   MonitorOff,
-  Send,
   CheckCircle2,
   Wifi,
   WifiOff,
@@ -25,12 +24,17 @@ import { cn } from '@/lib/utils'
 import { AudioVisualizer } from './audio-visualizer'
 import { useGeminiLive } from '@/hooks/use-gemini-live'
 import { useAuth } from '@/context/AuthContext'
+import type { QuestionPlan } from '@/lib/questionDiscovery'
 
 interface InterviewSessionProps {
   config: {
     type: string
     resume?: string
     jobDescription?: string
+    difficulty?: 'easy' | 'medium' | 'hard'
+    role?: string
+    companyName?: string | null
+    questionPlan?: QuestionPlan
   }
 }
 
@@ -51,18 +55,18 @@ export function InterviewSession({ config }: InterviewSessionProps) {
 
   const [sessionStarted, setSessionStarted] = useState(false)
   const [sessionEnded, setSessionEnded] = useState(false)
-  const [inputValue, setInputValue]     = useState('')
   const [sessionTime, setSessionTime]   = useState(0)
   const [isEvaluating, setIsEvaluating] = useState(false)
   const [evaluationDone, setEvaluationDone] = useState(false)
   const [evalError, setEvalError] = useState<string | null>(null)
+  const [showFallbackNotice, setShowFallbackNotice] = useState(true)
+  const [screenShareAcknowledged, setScreenShareAcknowledged] = useState(false)
 
   // Persist session ID and background notes across renders without triggering re-renders
   const sessionIdRef = useRef<string | null>(null)
   const backgroundNotesRef = useRef<any[]>([])
   const lastNotedTurnRef = useRef(0)
   const sessionTimeRef = useRef(0)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const {
     agentState,
@@ -74,8 +78,15 @@ export function InterviewSession({ config }: InterviewSessionProps) {
     disconnect,
     toggleMic,
     toggleScreenShare,
-    sendText,
-  } = useGeminiLive(config)
+  } = useGeminiLive({
+    type: config.type,
+    resume: config.resume,
+    jobDescription: config.jobDescription,
+    company: config.companyName ?? undefined,
+    role: config.role,
+    difficulty: config.difficulty,
+    questionPlan: config.questionPlan,
+  })
 
   // Keep sessionTimeRef in sync so we can read it in the end-handler
   useEffect(() => {
@@ -127,11 +138,14 @@ export function InterviewSession({ config }: InterviewSessionProps) {
 
     lastNotedTurnRef.current = userTurns
 
+    // Omit large resume/JD fields — the notes observer prompt doesn't use them
+    const { resume: _r, jobDescription: _jd, ...notesConfig } = config
+
     // Fire-and-forget: no await, no blocking
     fetch('/api/notes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transcript, sessionConfig: config }),
+      body: JSON.stringify({ transcript, sessionConfig: notesConfig }),
     })
       .then((r) => r.json())
       .then((data) => {
@@ -143,19 +157,8 @@ export function InterviewSession({ config }: InterviewSessionProps) {
       .catch((err) => console.warn('[InterviewSession] Background notes failed:', err))
   }, [transcript, config])
 
-  // ── Auto-scroll transcript ───────────────────────────────────────────────
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [transcript])
-
   const formatTime = (s: number) =>
     `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`
-
-  const handleSendMessage = useCallback(() => {
-    if (!inputValue.trim()) return
-    sendText(inputValue.trim())
-    setInputValue('')
-  }, [inputValue, sendText])
 
   // ── End interview: save session → evaluate → redirect ────────────────────
   const handleEndInterview = useCallback(async () => {
@@ -215,23 +218,81 @@ export function InterviewSession({ config }: InterviewSessionProps) {
   }, [disconnect, transcript, firebaseUser, config, router])
 
   // ── Pre-session: require a click so AudioContext is allowed ─────────────
+  const hasScreenSharePrompt =
+    !!config.questionPlan && !!config.questionPlan.screen_share_prompt
+
   if (!sessionStarted) {
     return (
       <div className="flex items-center justify-center min-h-screen p-6">
-        <Card className="bg-card/70 border-border/40 p-10 max-w-md w-full text-center space-y-5 animate-scale-in">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/15 border border-primary/30">
-            <Mic className="h-8 w-8 text-primary" />
+        <Card className="bg-card/70 border-border/40 p-10 max-w-lg w-full space-y-6 animate-scale-in">
+          <div className="flex items-center gap-4">
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/15 border border-primary/30">
+              <Mic className="h-8 w-8 text-primary" />
+            </div>
+            <div className="flex-1 space-y-1">
+              <h2 className="text-2xl font-bold text-foreground">Ready to Begin?</h2>
+              <p className="text-muted-foreground leading-relaxed text-sm">
+                Your{' '}
+                <span className="capitalize font-medium text-foreground">
+                  {config.type.replace('-', ' ')}
+                </span>{' '}
+                interview session is ready. You&apos;ll need to allow microphone access so the AI
+                interviewer can hear you.
+              </p>
+            </div>
           </div>
-          <h2 className="text-2xl font-bold text-foreground">Ready to Begin?</h2>
-          <p className="text-muted-foreground leading-relaxed text-sm">
-            Your <span className="capitalize font-medium text-foreground">{config.type.replace('-', ' ')}</span> interview
-            session is ready. Click below to connect — you&apos;ll need to allow microphone access so the
-            AI interviewer can hear you.
-          </p>
-          <Button size="lg" className="w-full gap-2" onClick={handleStartSession}>
-            <Play className="h-4 w-4" />
-            Start Interview
-          </Button>
+
+          {hasScreenSharePrompt && !screenShareAcknowledged && (
+            <div className="space-y-3 rounded-md border border-primary/40 bg-primary/5 p-4 text-left">
+              <p className="text-sm font-medium text-primary">
+                {config.questionPlan?.screen_share_prompt}
+              </p>
+              {config.questionPlan?.questions?.length ? (
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground font-medium">
+                    LeetCode problems for this session:
+                  </p>
+                  <ul className="list-disc pl-5 space-y-1 text-xs">
+                    {config.questionPlan.questions.map((q) => (
+                      <li key={q.order}>
+                        {q.leetcode_url ? (
+                          <a
+                            href={q.leetcode_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-primary hover:underline"
+                          >
+                            {q.title}
+                          </a>
+                        ) : (
+                          <span>{q.title}</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row gap-3">
+            <Button
+              size="lg"
+              className="w-full gap-2"
+              onClick={() => {
+                if (hasScreenSharePrompt && !screenShareAcknowledged) {
+                  setScreenShareAcknowledged(true)
+                } else {
+                  handleStartSession()
+                }
+              }}
+            >
+              <Play className="h-4 w-4" />
+              {hasScreenSharePrompt && !screenShareAcknowledged
+                ? "I've opened the problems — Continue"
+                : 'Start Interview'}
+            </Button>
+          </div>
         </Card>
       </div>
     )
@@ -305,194 +366,163 @@ export function InterviewSession({ config }: InterviewSessionProps) {
 
   const isConnected = agentState !== 'disconnected' && agentState !== 'connecting'
 
+  const ambientBg =
+    agentState === 'speaking'
+      ? 'radial-gradient(ellipse 55% 45% at 50% 52%, rgba(109,40,217,0.14) 0%, transparent 70%)'
+      : agentState === 'listening' || agentState === 'connected'
+      ? 'radial-gradient(ellipse 55% 45% at 50% 52%, rgba(37,99,235,0.10) 0%, transparent 70%)'
+      : 'radial-gradient(ellipse 55% 45% at 50% 52%, rgba(255,255,255,0.02) 0%, transparent 70%)'
+
   return (
-    <div className="grid grid-cols-3 gap-5 h-screen p-5 overflow-hidden animate-fade-in">
+    <div className="h-screen overflow-hidden bg-[#07070d] relative flex flex-col items-center justify-center animate-fade-in">
 
-      {/* ── Left: AI Avatar + Controls ─────────────────────────────────── */}
-      <div className="col-span-2 bg-black/80 rounded-xl overflow-hidden flex flex-col border border-border/20">
-        <div className="flex-1 bg-linear-to-br from-primary/15 to-accent/8 flex items-center justify-center relative">
+      {/* Dynamic ambient glow */}
+      <motion.div
+        className="absolute inset-0 pointer-events-none"
+        animate={{ background: ambientBg }}
+        transition={{ duration: 1.2, ease: 'easeInOut' }}
+      />
 
-          {/* AI Avatar / Visualizer */}
-          <div className="space-y-5 text-center flex flex-col items-center">
-            {agentState === 'connecting' ? (
-              <div className="flex flex-col items-center gap-4">
-                <Loader2 className="h-16 w-16 text-primary animate-spin" />
-                <p className="text-muted-foreground text-sm">Connecting to AI Interviewer…</p>
-              </div>
-            ) : (
-              <>
-                <AudioVisualizer state={agentState} />
-                <p className="text-foreground font-medium text-sm">AI Interviewer</p>
-                <p className="text-xs text-muted-foreground capitalize">{config.type.replace('-', ' ')} Interview</p>
-              </>
-            )}
-          </div>
+      {/* Subtle grid texture */}
+      <div
+        className="absolute inset-0 pointer-events-none opacity-[0.03]"
+        style={{
+          backgroundImage:
+            'linear-gradient(rgba(255,255,255,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.5) 1px, transparent 1px)',
+          backgroundSize: '48px 48px',
+        }}
+      />
 
-          {/* Error banner */}
-          {error && (
-            <div className="absolute top-4 left-4 right-4 flex items-center gap-2 bg-red-950/80 border border-red-500/40 rounded-lg px-4 py-2.5 backdrop-blur-sm text-sm text-red-300">
-              <AlertCircle className="h-4 w-4 shrink-0" />
-              {error}
-            </div>
-          )}
-
-          {/* Status + Timer */}
-          <div className="absolute top-4 right-4 flex items-center gap-2">
-            <div className={cn(
-              'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border backdrop-blur-sm',
-              isConnected
-                ? 'bg-green-950/60 border-green-500/30 text-green-400'
-                : 'bg-black/60 border-white/10 text-muted-foreground'
-            )}>
-              {isConnected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
-              {STATE_LABELS[agentState]}
-            </div>
-            <div className="bg-black/60 backdrop-blur-sm px-3 py-1.5 rounded-lg border border-white/10">
-              <p className="font-mono text-sm text-foreground tabular-nums">{formatTime(sessionTime)}</p>
-            </div>
-          </div>
-
-          {/* Screen share indicator */}
+      {/* ── Top bar ──────────────────────────────────────────────────── */}
+      <div className="absolute top-5 left-5 right-5 flex items-center justify-between">
+        {/* Screen share pill */}
+        <div className="min-w-[80px]">
           {isScreenSharing && (
-            <div className="absolute top-4 left-4 flex items-center gap-1.5 bg-blue-950/70 border border-blue-500/30 rounded-lg px-2.5 py-1 text-xs text-blue-300 backdrop-blur-sm">
+            <div className="flex items-center gap-1.5 bg-white/6 border border-white/10 rounded-full px-3 py-1.5 text-xs text-white/60 backdrop-blur-sm w-fit">
               <Monitor className="h-3 w-3" />
               Screen shared
             </div>
           )}
+        </div>
 
-          {/* Background notes indicator */}
-          {backgroundNotesRef.current.length > 0 && (
-            <div className="absolute bottom-20 left-4 flex items-center gap-1.5 bg-primary/10 border border-primary/20 rounded-lg px-2.5 py-1 text-xs text-primary backdrop-blur-sm">
-              <Sparkles className="h-3 w-3" />
-              {backgroundNotesRef.current.length} note{backgroundNotesRef.current.length !== 1 ? 's' : ''} captured
-            </div>
-          )}
-
-          {/* Controls */}
-          <div className="absolute bottom-5 left-0 right-0 flex gap-3 justify-center">
-            {/* Mic */}
-            <Button
-              size="lg"
-              variant="outline"
-              onClick={toggleMic}
-              disabled={!isConnected}
-              title={isMicMuted ? 'Unmute mic' : 'Mute mic'}
-              className={cn(
-                'bg-black/50 border-white/20 hover:bg-black/70',
-                isMicMuted && 'bg-red-500/20 border-red-500/50 text-red-400'
-              )}
-            >
-              {isMicMuted ? <MicOff /> : <Mic />}
-            </Button>
-
-            {/* Screen share */}
-            <Button
-              size="lg"
-              variant="outline"
-              onClick={toggleScreenShare}
-              disabled={!isConnected}
-              title={isScreenSharing ? 'Stop screen share' : 'Share screen'}
-              className={cn(
-                'bg-black/50 border-white/20 hover:bg-black/70',
-                isScreenSharing && 'bg-blue-500/20 border-blue-500/50 text-blue-300'
-              )}
-            >
-              {isScreenSharing ? <MonitorOff /> : <Monitor />}
-            </Button>
-
-            {/* End interview */}
-            <Button
-              size="lg"
-              onClick={handleEndInterview}
-              className="bg-red-600 hover:bg-red-700 text-white shadow-sm shadow-red-900/50"
-            >
-              <PhoneOff />
-              End Interview
-            </Button>
+        {/* Status + timer */}
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 bg-white/6 border border-white/10 rounded-full px-3 py-1.5 text-xs text-white/60 backdrop-blur-sm">
+            <span className={cn(
+              'h-1.5 w-1.5 rounded-full transition-colors duration-500',
+              agentState === 'speaking' ? 'bg-violet-400 animate-pulse' :
+              agentState === 'listening' || agentState === 'connected' ? 'bg-blue-400 animate-pulse' :
+              isConnected ? 'bg-emerald-400' : 'bg-white/20'
+            )} />
+            {STATE_LABELS[agentState]}
+          </div>
+          <div className="bg-white/6 backdrop-blur-sm px-3 py-1.5 rounded-full border border-white/10">
+            <p className="font-mono text-xs text-white/60 tabular-nums">{formatTime(sessionTime)}</p>
           </div>
         </div>
       </div>
 
-      {/* ── Right: Transcript / Chat ────────────────────────────────────── */}
-      <div className="bg-card/40 border border-border/40 rounded-xl flex flex-col overflow-hidden">
-        <div className="border-b border-border/40 px-4 py-3.5">
-          <h3 className="font-semibold text-foreground flex items-center gap-2 text-sm">
-            <MessageCircle className="h-4 w-4 text-primary" />
-            Live Transcript
-          </h3>
-          <p className="text-xs text-muted-foreground mt-0.5 capitalize">{config.type.replace('-', ' ')} Interview</p>
+      {/* ── Error banner ─────────────────────────────────────────────── */}
+      {error && (
+        <div className="absolute top-16 left-5 right-5 flex items-center gap-2 bg-red-950/80 border border-red-500/30 rounded-2xl px-4 py-3 backdrop-blur-sm text-sm text-red-300 z-10">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          {error}
         </div>
+      )}
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {transcript.length === 0 && agentState !== 'disconnected' && (
-            <p className="text-xs text-muted-foreground text-center pt-6 leading-relaxed">
-              {agentState === 'connecting'
-                ? 'Connecting to the AI interviewer…'
-                : 'The AI interviewer will speak shortly. Transcript will appear here.'}
-            </p>
-          )}
-
-          {transcript.map((entry, i) => (
-            <div
-              key={i}
-              className={cn('flex animate-fade-up', entry.role === 'user' && 'justify-end')}
-            >
-              <div
-                className={cn(
-                  'max-w-[85%] rounded-xl px-3.5 py-2.5 text-sm leading-relaxed',
-                  entry.role === 'ai'
-                    ? 'bg-primary/15 text-foreground border border-primary/20'
-                    : 'bg-secondary/20 text-foreground border border-secondary/20'
-                )}
-              >
-                <span className="text-[10px] font-semibold uppercase tracking-wide opacity-50 block mb-1">
-                  {entry.role === 'ai' ? 'AI Interviewer' : 'You'}
-                </span>
-                {entry.text}
-              </div>
-            </div>
-          ))}
-
-          {agentState === 'speaking' && (
-            <div className="flex gap-1.5 px-1 animate-fade-in">
-              {[0, 1, 2].map((i) => (
-                <span
-                  key={i}
-                  className="h-2 w-2 rounded-full bg-primary/60 animate-bounce"
-                  style={{ animationDelay: `${i * 150}ms` }}
-                />
-              ))}
-            </div>
-          )}
-
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Text input (as a fallback / supplement to voice) */}
-        <div className="border-t border-border/40 p-3 space-y-2">
-          <div className="flex gap-2">
-            <input
-              type="text"
-              placeholder="Type a message…"
-              value={inputValue}
-              disabled={!isConnected}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
-              className="flex-1 px-3 py-2 bg-input/60 border border-border/40 rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30 transition-all disabled:opacity-40"
-            />
-            <Button
-              size="icon-sm"
-              onClick={handleSendMessage}
-              disabled={!inputValue.trim() || !isConnected}
-            >
-              <Send />
-            </Button>
-          </div>
-          <p className="text-xs text-muted-foreground px-1">
-            {isConnected ? 'Speak naturally or type your response.' : 'Waiting for connection…'}
+      {/* ── Fallback notice ───────────────────────────────────────────── */}
+      {config.questionPlan?.source === 'fallback_random' && showFallbackNotice && (
+        <div className="absolute top-16 left-5 right-5 flex items-start justify-between gap-3 bg-amber-950/70 border border-amber-500/30 rounded-2xl px-4 py-3 backdrop-blur-sm text-xs text-amber-200 z-10">
+          <p>
+            We couldn&apos;t find specific questions for{' '}
+            <span className="font-semibold">
+              {config.questionPlan.company ?? config.companyName ?? 'this company'}
+            </span>
+            . Using a curated set instead.
           </p>
+          <button
+            type="button"
+            onClick={() => setShowFallbackNotice(false)}
+            className="text-amber-300 hover:text-amber-100 text-[10px] underline-offset-2 hover:underline shrink-0"
+          >
+            Dismiss
+          </button>
         </div>
+      )}
+
+      {/* ── Centre: Visualizer ────────────────────────────────────────── */}
+      <div className="flex flex-col items-center gap-6 relative z-10">
+        {agentState === 'connecting' ? (
+          <div className="flex flex-col items-center gap-5">
+            <div className="w-22 h-22 flex items-center justify-center" style={{ width: 88, height: 88 }}>
+              <Loader2 className="h-12 w-12 text-white/40 animate-spin" />
+            </div>
+            <p className="text-white/40 text-sm tracking-wide">Connecting to AI Interviewer…</p>
+          </div>
+        ) : (
+          <>
+            <AudioVisualizer state={agentState} />
+            <div className="text-center space-y-1.5">
+              <p className="text-white/90 font-medium tracking-wide">AI Interviewer</p>
+              <p className="text-white/35 text-xs tracking-widest uppercase">
+                {config.type.replace('-', ' ')} Interview
+              </p>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* ── Background notes pill ────────────────────────────────────── */}
+      {backgroundNotesRef.current.length > 0 && (
+        <div className="absolute bottom-28 flex items-center gap-1.5 bg-white/6 border border-white/10 rounded-full px-3 py-1.5 text-xs text-white/40 backdrop-blur-sm">
+          <Sparkles className="h-3 w-3" />
+          {backgroundNotesRef.current.length} note{backgroundNotesRef.current.length !== 1 ? 's' : ''} captured
+        </div>
+      )}
+
+      {/* ── Controls ─────────────────────────────────────────────────── */}
+      <div className="absolute bottom-8 flex items-center gap-3">
+        {/* Mic */}
+        <button
+          onClick={toggleMic}
+          disabled={!isConnected}
+          title={isMicMuted ? 'Unmute mic' : 'Mute mic'}
+          aria-label={isMicMuted ? 'Unmute mic' : 'Mute mic'}
+          className={cn(
+            'h-12 w-12 rounded-full flex items-center justify-center backdrop-blur-sm border transition-all duration-200 disabled:opacity-30',
+            isMicMuted
+              ? 'bg-red-500/15 border-red-400/30 text-red-300 hover:bg-red-500/25'
+              : 'bg-white/8 border-white/12 text-white/70 hover:bg-white/14 hover:text-white'
+          )}
+        >
+          {isMicMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+        </button>
+
+        {/* Screen share */}
+        <button
+          onClick={toggleScreenShare}
+          disabled={!isConnected}
+          title={isScreenSharing ? 'Stop screen share' : 'Share screen'}
+          aria-label={isScreenSharing ? 'Stop screen share' : 'Share screen'}
+          className={cn(
+            'h-12 w-12 rounded-full flex items-center justify-center backdrop-blur-sm border transition-all duration-200 disabled:opacity-30',
+            isScreenSharing
+              ? 'bg-blue-500/15 border-blue-400/30 text-blue-300 hover:bg-blue-500/25'
+              : 'bg-white/8 border-white/12 text-white/70 hover:bg-white/14 hover:text-white'
+          )}
+        >
+          {isScreenSharing ? <MonitorOff className="h-5 w-5" /> : <Monitor className="h-5 w-5" />}
+        </button>
+
+        {/* End interview */}
+        <button
+          onClick={handleEndInterview}
+          aria-label="End interview"
+          className="h-12 px-5 rounded-full flex items-center gap-2 bg-red-500/90 hover:bg-red-500 text-white font-medium text-sm transition-all duration-200 shadow-lg shadow-red-900/30"
+        >
+          <PhoneOff className="h-4 w-4" />
+          End Interview
+        </button>
       </div>
     </div>
   )

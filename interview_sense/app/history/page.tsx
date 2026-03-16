@@ -8,7 +8,7 @@ import { DashboardHeader } from '@/components/dashboard/header'
 import { Sidebar } from '@/components/dashboard/sidebar'
 import { ProtectedRoute } from '@/components/ProtectedRoute'
 import { useAuth } from '@/context/AuthContext'
-import { Download, Trash2, Loader2 } from 'lucide-react'
+import { FileText, Trash2, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
   getAllSessions,
@@ -18,13 +18,7 @@ import {
   formatDuration,
   type Session,
 } from '@/lib/firestore'
-
-function scoreBadge(score: number) {
-  if (score >= 8.5) return 'bg-green-500/15 text-green-400 border border-green-500/20'
-  if (score >= 7)   return 'bg-blue-500/15 text-blue-400 border border-blue-500/20'
-  if (score >= 5.5) return 'bg-yellow-500/15 text-yellow-400 border border-yellow-500/20'
-  return 'bg-red-500/15 text-red-400 border border-red-500/20'
-}
+import { getScoreBadgeClasses } from '@/lib/scoreUtils'
 
 export default function HistoryPage() {
   return (
@@ -148,7 +142,7 @@ function HistoryContent() {
                         <td className="px-6 py-4 text-sm text-muted-foreground">{formatDate(session.createdAt)}</td>
                         <td className="px-6 py-4 text-center">
                           {session.score != null ? (
-                            <span className={cn('inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold tabular-nums', scoreBadge(session.score))}>
+                            <span className={cn('inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold tabular-nums', getScoreBadgeClasses(session.score))}>
                               {session.score}/10
                             </span>
                           ) : (
@@ -162,9 +156,9 @@ function HistoryContent() {
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                            <Link href={`/reports?session=${session.id}`}>
-                              <Button variant="ghost" size="icon-sm" title="View report">
-                                <Download className="h-4 w-4" />
+                            <Link href={`/reports/${session.id}`}>
+                              <Button variant="ghost" size="icon-sm" title="View report" aria-label="View report">
+                                <FileText className="h-4 w-4" />
                               </Button>
                             </Link>
                             <Button

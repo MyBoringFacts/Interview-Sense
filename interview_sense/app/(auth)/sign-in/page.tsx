@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { Suspense, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { signInWithEmailAndPassword, sendEmailVerification } from 'firebase/auth'
@@ -10,6 +10,14 @@ import { Card } from '@/components/ui/card'
 import { Loader2, LogIn, Eye, EyeOff, Sparkles, MailCheck } from 'lucide-react'
 
 export default function SignInPage() {
+  return (
+    <Suspense>
+      <SignInContent />
+    </Suspense>
+  )
+}
+
+function SignInContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const needsVerification = searchParams.get('error') === 'verify-email'
@@ -203,3 +211,4 @@ export default function SignInPage() {
     </div>
   )
 }
+

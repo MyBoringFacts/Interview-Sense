@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { Card } from '@/components/ui/card'
@@ -16,22 +16,15 @@ import {
   formatDate,
   type Session,
 } from '@/lib/firestore'
+import { getScoreColors } from '@/lib/scoreUtils'
 
-// Helper: format score with colour
 function ScoreBadge({ score }: { score: number }) {
-  const color =
-    score >= 8.5 ? 'text-green-400' :
-    score >= 7   ? 'text-blue-400'  :
-    score >= 5.5 ? 'text-yellow-400' : 'text-red-400'
-  const barColor =
-    score >= 8.5 ? 'bg-green-500' :
-    score >= 7   ? 'bg-blue-500'  :
-    score >= 5.5 ? 'bg-yellow-500' : 'bg-red-500'
+  const { text, bg } = getScoreColors(score)
   return (
     <div className="space-y-2">
-      <p className={`text-3xl font-bold tabular-nums ${color}`}>{score.toFixed(1)}</p>
+      <p className={`text-3xl font-bold tabular-nums ${text}`}>{score.toFixed(1)}</p>
       <div className="w-full bg-muted/20 rounded-full h-1.5">
-        <div className={`h-full rounded-full ${barColor}`} style={{ width: `${(score / 10) * 100}%` }} />
+        <div className={`h-full rounded-full ${bg}`} style={{ width: `${(score / 10) * 100}%` }} />
       </div>
     </div>
   )
@@ -40,7 +33,9 @@ function ScoreBadge({ score }: { score: number }) {
 export default function ReportsPage() {
   return (
     <ProtectedRoute>
-      <ReportsContent />
+      <Suspense>
+        <ReportsContent />
+      </Suspense>
     </ProtectedRoute>
   )
 }
@@ -173,9 +168,9 @@ function ReportsContent() {
                       </div>
                     )}
 
-                    <Link href={`/history`}>
+                    <Link href={`/reports/${session.id}`}>
                       <Button variant="outline" className="w-full opacity-80 group-hover:opacity-100 transition-opacity">
-                        View in History
+                        View Report
                       </Button>
                     </Link>
                   </div>
